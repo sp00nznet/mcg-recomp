@@ -80,6 +80,10 @@ uint32_t shims_arena_committed(void);
  * reached that way means the engine was re-entered while still building
  * whatever it was drawing. */
 extern int g_wndproc_depth;
+
+/* Pump activity counters, so the watchdog can tell a blocked loop from a
+ * spinning one. */
+extern volatile uint32_t g_n_peek, g_n_dispatch, g_n_wndproc;
 void*    shims_handle(uint32_t v);   /* 32-bit handle -> host pointer */
 
 /* The DirectDraw mock (ddraw.c): one COM object graph built in simulated

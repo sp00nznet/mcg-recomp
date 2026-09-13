@@ -299,9 +299,11 @@ static DWORD WINAPI watchdog(LPVOID unused) {
         uint32_t pc = g_cur_pc;
         same = (pc == last_pc) ? same + 1 : 0;
         last_pc = pc;
-        fprintf(stderr, "[watchdog] func=0x%08X pc=0x%08X depth=%u%s\n",
+        fprintf(stderr, "[watchdog] func=0x%08X pc=0x%08X depth=%u "
+                "peek=%u dispatch=%u wndproc=%u%s\n",
                 g_cur_func, pc, g_callstack_n,
-                same ? "  (unchanged -- blocked here)" : "");
+                g_n_peek, g_n_dispatch, g_n_wndproc,
+                same ? "  (PC unchanged)" : "");
         if (same) {
             uint32_t n = g_callstack_n < CALLSTACK_MAX
                        ? g_callstack_n : CALLSTACK_MAX;

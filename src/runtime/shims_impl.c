@@ -1135,6 +1135,7 @@ static LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
     uint32_t proc = class_proc((ATOM)GetClassLongPtrA(hwnd, GCW_ATOM));
     if (!proc) return DefWindowProcA(hwnd, msg, wp, lp);
     g_wndproc_depth++;
+    g_n_wndproc++;
     /*
      * Keep the engine active.
      *
@@ -1166,6 +1167,20 @@ static LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
      * returned, so this is where the window first gets a 32-bit identity. */
     uint32_t args[4] = { h_put(hwnd), msg, (uint32_t)wp, (uint32_t)lp };
     uint32_t r = call_lifted(proc, 4, args);
+    /*
+     * WM_PAINT must leave the window validated, or Windows regenerates it
+     * immediately and the queue never empties.
+     *
+     * A fullscreen DirectDraw title has no reason to handle WM_PAINT -- it
+     * owns the screen and redraws from its own loop -- so the engine returns
+     * without calling BeginPaint/EndPaint. Windowed, that is an endless paint
+     * storm: PeekMessage returned a message every single time (peek and
+     * dispatch climbing together at ~1700/s) and aSystem::run never got past
+     * the pump to UpdateDisplay. Hence a window that was running hard and
+     * drawing nothing.
+     */
+    if (msg == WM_PAINT)
+        ValidateRect(hwnd, NULL);
     g_cur_msg = outer;
     g_wndproc_depth--;
     return (LRESULT)(LONG_PTR)(int32_t)r;
@@ -1427,7 +1442,14 @@ static void service_timer(void) {
     inside = 0;
 }
 
+/* Counters the watchdog prints, so "parked" can be told apart from "spinning":
+ * a PC that never moves means nothing at all is happening, but a PC that never
+ * moves WHILE these climb means a loop that keeps landing on the same
+ * instruction. */
+volatile uint32_t g_n_peek, g_n_dispatch, g_n_wndproc;
+
 void imp_PeekMessageA(void) {
+    g_n_peek++;
     service_timer();
     MSG m;
     BOOL got = PeekMessageA(&m, HWND_OF(ARG(1)), ARG(2), ARG(3), ARG(4));
@@ -1443,6 +1465,7 @@ void imp_TranslateMessage(void) {
 }
 
 void imp_DispatchMessageA(void) {
+    g_n_dispatch++;
     MSG m; msg_in(ARG(0), &m);
     RET((uint32_t)(LONG_PTR)DispatchMessageA(&m));
     STDRET(1);
