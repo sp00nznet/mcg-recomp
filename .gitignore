@@ -1,0 +1,37 @@
+# The retail install lives in this same folder (DATA/, *.FST, MCX.EXE, SETUP/,
+# DIRECTX/, ...). Rather than chase every game file by name, ignore everything
+# at the root and allow the repo back in explicitly. Copyrighted data then
+# cannot be committed by accident, which is the point.
+/*
+!/.gitignore
+!/LICENSE
+!/README.md
+!/CLAUDE.md
+!/CMakeLists.txt
+!/run_pipeline.py
+!/config/
+!/analysis/
+!/docs/
+!/src/
+!/tools/
+
+# ...but nothing derived or copyrighted inside those either.
+analysis/*.exe
+analysis/*.dll
+src/recomp/gen/
+build/
+__pycache__/
+*.pyc
+*.obj
+*.o
+
+# IDA / Ghidra databases
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+
+Thumbs.db
+.DS_Store
