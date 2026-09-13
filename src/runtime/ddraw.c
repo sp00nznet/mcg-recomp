@@ -261,6 +261,9 @@ static void sf_Lock(void) {
     fill_desc(s, d);
     MEM32(d + SD_FLAGS) = MEM32(d + SD_FLAGS) | DDSD_LPSURFACE;
     MEM32(d + SD_SURFACE) = s->bits;           /* the engine draws straight here */
+    { static int shown; if (shown < 4) { shown++;
+        fprintf(stderr, "[ddraw] Lock %ux%u pitch %u -> 0x%08X\n",
+                s->width, s->height, s->pitch, s->bits); } }
     RET(DD_OK);
     STDRET(5);
 }

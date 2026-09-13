@@ -73,6 +73,11 @@ void     shims_set_program(const char* path);
 void     shims_report(void);
 uint32_t shims_put_str(const char* s);
 uint32_t shims_alloc(uint32_t n);
+
+/* Non-zero while lifted code is running inside the window procedure. A fault
+ * reached that way means the engine was re-entered while still building
+ * whatever it was drawing. */
+extern int g_wndproc_depth;
 void*    shims_handle(uint32_t v);   /* 32-bit handle -> host pointer */
 
 /* The DirectDraw mock (ddraw.c): one COM object graph built in simulated

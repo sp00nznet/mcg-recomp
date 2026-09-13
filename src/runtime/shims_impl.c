@@ -1089,11 +1089,19 @@ static uint32_t class_proc(ATOM a) {
  * faults on the truncated address rather than reading something plausible,
  * which is the failure worth having -- marshal that message's struct then. */
 typedef struct { HWND hwnd; UINT msg; LPARAM lp; } cur_msg_t;
+/* Non-zero while lifted code is running inside a window procedure --
+ * printed on a fault, because a crash reached that way means the engine
+ * was re-entered while it was still building whatever it drew. */
+int g_wndproc_depth;
 static cur_msg_t g_cur_msg;
 
 static LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     uint32_t proc = class_proc((ATOM)GetClassLongPtrA(hwnd, GCW_ATOM));
     if (!proc) return DefWindowProcA(hwnd, msg, wp, lp);
+    g_wndproc_depth++;
+    { static int shown; if (shown < 12) { shown++;
+        fprintf(stderr, "[win] wndproc msg=%04X (depth %d)\n", msg,
+                g_wndproc_depth); } }
     cur_msg_t outer = g_cur_msg;            /* nested dispatches nest correctly */
     g_cur_msg.hwnd = hwnd;
     g_cur_msg.msg = msg;
@@ -1103,6 +1111,7 @@ static LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
     uint32_t args[4] = { h_put(hwnd), msg, (uint32_t)wp, (uint32_t)lp };
     uint32_t r = call_lifted(proc, 4, args);
     g_cur_msg = outer;
+    g_wndproc_depth--;
     return (LRESULT)(LONG_PTR)(int32_t)r;
 }
 

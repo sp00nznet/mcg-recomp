@@ -98,10 +98,34 @@ static void check_bp(uint32_t bp_before, uint32_t site, uint32_t target) {
                 site, bp_before, g_ebp);
 }
 
+/* A ring of (call site -> callee) pairs. The function-entry trace says WHAT
+ * ran; this says who called it, which is the half you need when an object
+ * arrives at a virtual method already wrong. */
+#define CALLSITE_RING 32
+static struct { uint32_t site, target; } g_callsites[CALLSITE_RING];
+static uint32_t g_callsite_i;
+
+static void note_callsite(uint32_t site, uint32_t target) {
+    g_callsites[g_callsite_i & (CALLSITE_RING - 1)].site = site;
+    g_callsites[g_callsite_i & (CALLSITE_RING - 1)].target = target;
+    g_callsite_i++;
+}
+
+static void dump_callsites(void) {
+    fprintf(stderr, "  recent indirect call sites (oldest first):\n");
+    for (uint32_t i = 0; i < CALLSITE_RING; i++) {
+        uint32_t k = (g_callsite_i - CALLSITE_RING + i) & (CALLSITE_RING - 1);
+        if (g_callsites[k].site)
+            fprintf(stderr, "    0x%08X -> 0x%08X\n",
+                    g_callsites[k].site, g_callsites[k].target);
+    }
+}
+
 /* Indirect form: the callee's VA is known here, so the report names the
  * function rather than only the dispatch site it went through. */
 void recomp_check_balance2(uint32_t sp_before, uint32_t bp_before,
                            uint32_t site, uint32_t target) {
+    note_callsite(site, target);
     check_bp(bp_before, site, target);
 #if RECOMP_RETADDR
     if ((g_ebx == RECOMP_RETADDR || g_esi == RECOMP_RETADDR ||
@@ -120,6 +144,10 @@ void recomp_check_balance2(uint32_t sp_before, uint32_t bp_before,
 }
 
 void recomp_check_balance(uint32_t sp_before, uint32_t bp_before, uint32_t site) {
+    /* Direct calls are recorded too: a derived draw() calling its own base
+     * class is a direct call, and that is exactly the edge where a `this`
+     * arrives already wrong. */
+    note_callsite(site, 0);
     check_bp(bp_before, site, 0);
     /* The poison is the real prize. RECOMP_RETADDR is a value no program would
      * compute, so finding it in a register the callee was supposed to preserve
@@ -145,8 +173,40 @@ void recomp_check_balance(uint32_t sp_before, uint32_t bp_before, uint32_t site)
                         "low (%08X -> %08X)\n", site, low, sp_before, g_esp);
 }
 
+/* A bad pointer's CONTENTS usually say what it really is: a vtable pointer and
+ * plausible fields mean a live object at the wrong offset; a repeating byte
+ * means fill; readable text or palette indices mean it is pointing into data. */
+static const char* describe_region(uint32_t va);
+
+/* Via the accessors, not the layout constants: this sits above the section that
+ * defines them. */
+static int readable_va(uint32_t va) {
+    return (va >= recomp_image_base() && va < recomp_image_end())
+        || (va >= recomp_stack_base() && va < recomp_stack_end())
+        || (va >= shims_arena_base() && va < shims_arena_end());
+}
+
+static void dump_around(const char* what, uint32_t va) {
+    if (!readable_va(va) || !readable_va(va + 31))
+        return;
+    fprintf(stderr, "  %s = %08X %s:\n", what, va, describe_region(va));
+    for (int row = 0; row < 2; row++) {
+        fprintf(stderr, "    %08X:", va + row * 16);
+        for (int i = 0; i < 16; i += 4)
+            fprintf(stderr, " %08X", MEM32(va + row * 16 + i));
+        fprintf(stderr, "\n");
+    }
+}
+
 /* Everything worth printing when something faults, in one place. */
 static void report_extra(void) {
+    /* Non-zero means the engine was re-entered through the window procedure --
+     * so whatever it was drawing may only have been half built. */
+    fprintf(stderr, "  window-proc depth: %d\n", g_wndproc_depth);
+    dump_around("ecx", g_ecx);
+    dump_around("esi", g_esi);
+    dump_around("edi", g_edi);
+    dump_callsites();
 #ifdef RECOMP_TRACE
     fprintf(stderr, "  faulting instruction: 0x%08X\n", g_cur_pc);
 #endif
@@ -375,13 +435,18 @@ static void mcg_Assert(void) {
     uint32_t file = MEM32(g_esp + 12);
     uint32_t msg = MEM32(g_esp + 16);
     if (!cond) {
-        static uint32_t seen[32];
+        /* Keyed on the message pointer as well as the line: plenty of these
+         * pass line 0, and deduping on the line alone collapsed all of them
+         * into the first one -- which hid every assertion after it. */
+        static struct { uint32_t line, msg; } seen[128];
         static uint32_t n;
         uint32_t i = 0;
         for (; i < n; i++)
-            if (seen[i] == line) break;
-        if (i == n && n < 32) {          /* once per assertion site */
-            seen[n++] = line;
+            if (seen[i].line == line && seen[i].msg == msg) break;
+        if (i == n && n < 128) {
+            seen[n].line = line;
+            seen[n].msg = msg;
+            n++;
             fprintf(stderr, "[game:Assert] %s:%u  %s\n",
                     file ? (const char*)ADDR(file) : "?", line,
                     msg ? (const char*)ADDR(msg) : "");
@@ -550,6 +615,26 @@ static int crt_selftest(void) {
     }
 
     a[0] = s_num; expect("atol(\"1024000\")", call_lifted(ATOL, 1, a), 1024000);
+
+    /* FitIniFile::textToLong -- the engine's own number parser, and the one
+     * every count and coordinate in a logistics screen comes through. It takes
+     * a hex path via strstr plus the `repne scasb` strlen idiom, or falls back
+     * to atol, so it exercises both of the string primitives fixed above. It is
+     * __thiscall with one stack argument; `this` is unused on these paths. */
+    {
+        const uint32_t TEXTTOLONG = 0x006494B0;
+        static const struct { const char* in; uint32_t want; } cases[] = {
+            { "123", 123 }, { "0", 0 }, { "4096", 4096 },
+            { "0x1E", 0x1E }, { "0x100", 0x100 }, { "0xFF", 0xFF },
+        };
+        for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
+            char label[64];
+            uint32_t arg = shims_put_str(cases[i].in);
+            g_ecx = 0;
+            snprintf(label, sizeof label, "textToLong(\"%s\")", cases[i].in);
+            expect(label, call_lifted(TEXTTOLONG, 1, &arg), cases[i].want);
+        }
+    }
 
     fprintf(stderr, "=== %s (%d failure%s) ===\n",
             g_st_fail ? "FAILURES" : "all passed", g_st_fail,

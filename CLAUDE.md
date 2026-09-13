@@ -219,6 +219,33 @@ run. Add a case whenever a primitive is suspected: it is cheap, and it converts
   run_pipeline.py is for.
 
 ### Current bring-up stop
+### Bring-up diagnostics available (trace builds)
+- `--selftest` -- lifted CRT string primitives AND `FitIniFile::textToLong`
+  (the engine's own number parser, hex and decimal) against the host's answers.
+- On a fault the report now prints: the faulting instruction VA, the window-proc
+  depth, a hex dump around ecx/esi/edi, and a ring of the last 32 **call sites**
+  (`site -> callee`, direct and indirect). The call-site ring is what identifies
+  a caller when an object arrives at a virtual method already wrong -- the
+  function-entry trace only says what ran, not who called it.
+
+### The lObject::draw object: what it is, and what it is NOT
+The pointer is NOT an unconstructed object -- its memory reads
+`FF FF 10 10 10 10 10 10 ...`, a run of palette index 0x10, i.e. it points into
+**art data**. `lButton::draw` runs on it without faulting (it only reads garbage
+fields); the fault comes when `lObject::draw` dereferences the vtable.
+The chain is `MCSplashScreen::init` (0x006E4D90) -> ... -> `lButton::draw`
+(+0xe3, +0xeb) -> `lObject::draw`. init itself wires buttons correctly: the
+virtual call at init+0x710 through `[esi]` reaches `lButton::callback`, so esi
+is a valid object there.
+
+**Disproven, do not retry:**
+1. `FitIniFile::textToLong` returning bad counts -- all six selftest cases pass,
+   decimal and hex (the hex path exercises `strstr` + the `repne scasb` idiom).
+2. "No Digital Sound Hardware Installed" -- `waveOutGetNumDevs` reports 1 now,
+   the message is gone, the fault is unchanged.
+3. Window-procedure re-entrancy drawing a half-built screen -- the crash report
+   prints `window-proc depth: 0`, so it is the engine's own flow.
+
 **`lObject::draw`** (`lport.obj`, 0x00710D80 +0x7c) makes a C++ virtual call
 `call [eax + 0xd4]` where the vtable pointer read from the object is
 `0x1010FFFF` -- garbage -- and a nearby register holds `0x1E1E1E1E`, a fill
