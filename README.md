@@ -9,6 +9,25 @@ bring your own legally-obtained copy.
 
 > *"Command the finest BattleMech pilots in the Inner Sphere."*
 
+## Where it is
+
+The recompiled binary running against a retail install — the engine's own code,
+lifted to C, drawing its own frames.
+
+**Main menu**
+
+![Main menu](docs/images/main-menu.png)
+
+**Briefing / Deployment** — campaign loaded, a 'Mech assigned to Force Group 1,
+drop weight tracking, tactical map with objective markers.
+
+![Briefing and deployment](docs/images/deployment.png)
+
+**In mission** — terrain, elevation, water and forest, with the HUD, radar and
+the deployed lance.
+
+![In mission](docs/images/mission.png)
+
 ## Why this one is different
 
 Nearly every project in this toolbox starts by *guessing* where the functions
