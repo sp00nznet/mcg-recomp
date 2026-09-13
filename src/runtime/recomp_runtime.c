@@ -381,6 +381,25 @@ static DWORD WINAPI watchdog(LPVOID unused) {
                     for (size_t k = 0; k < n; k++) if (px[k] != 0x10) nz++;
                 }
                 snprintf(ready + off, sizeof ready - off, " port %zu/%zu", nz, n);
+                /* Once: show the first entry's 52x46 cell. "487 pixels" does
+                 * not say WHICH 487 -- outlines, half a glyph, or a picture
+                 * that landed one column wide all look the same as a count. */
+                if (nz > 0 && win) {
+                    static int dumped;
+                    uint32_t w = MEM32(win + 4) + 1;
+                    const uint8_t* px = (const uint8_t*)ADDR(MEM32(win));
+                    if (!dumped) {
+                        dumped = 1;
+                        fprintf(stderr, "[deploy] first entry cell:\n");
+                        for (int yy = 0; yy < 46; yy++) {
+                            fprintf(stderr, "      ");
+                            for (int xx = 0; xx < 52; xx++)
+                                fputc(px[(size_t)(yy + 3) * w + (xx + 4)] == 0x10
+                                      ? '.' : '#', stderr);
+                            fputc('\n', stderr);
+                        }
+                    }
+                }
             }
         }
         char mechs[128] = "";
