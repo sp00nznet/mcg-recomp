@@ -39,6 +39,44 @@ COND_JUMPS = {'je', 'jne', 'jz', 'jnz', 'ja', 'jae', 'jb', 'jbe', 'jg', 'jge',
 FPU_CMP = {'EQ': '==', 'NE': '!=', 'B': '<', 'BE': '<=', 'A': '>', 'AE': '>=',
            'L': '<', 'LE': '<=', 'G': '>', 'GE': '>='}
 
+BALANCE_CALL = re.compile(r'^RECOMP_(I?)CALL\((.+?)\);')
+
+
+def _balance(va):
+    """Wrap a direct call so that a stack leak names its own call site.
+
+    RECOMP_CALL pushes the dummy return address and the callee's `ret` pops it,
+    plus its arguments for a stdcall. So esp after a call is never LOWER than
+    before it -- unless the callee failed to pop at all, which leaks 4 bytes and
+    only shows up much later, as a poisoned value in a callee-saved register
+    somewhere unrelated. Checking at the call site turns that into a name.
+
+    Compiles away without -DRECOMP_TRACE.
+    """
+    def sub(m):
+        indirect, target = m.group(1), m.group(2)
+        if indirect:
+            # Evaluate the target once into a temporary: it names the callee in
+            # the report, which is what turns "something inside _initterm" into
+            # the one static constructor that misbehaved.
+            return (f'{{ uint32_t _sp0 = g_esp, _tg = (uint32_t)({target}); '
+                    f'RECOMP_ICALL(_tg); '
+                    f'RECOMP_BALANCE2(_sp0, 0x{va:08X}u, _tg); }}')
+        return (f'{{ uint32_t _sp0 = g_esp; RECOMP_CALL({target}); '
+                f'RECOMP_BALANCE(_sp0, 0x{va:08X}u); }}')
+    return sub
+
+
+# Functions the runtime replaces, in recomp_lookup_manual(). The bodies are
+# still generated -- they cost nothing unused, and keep the dispatch table
+# complete -- but callers reach them indirectly so the override takes effect.
+# Keep this list short and say why each one is here.
+OVERRIDES = {
+    0x006440B0: 'GeneralMsg(char*) -- print the message, skip the %f path',
+    0x006440D0: 'FatalMsg(char*)   -- ditto; x87 80-bit formatting derails',
+    0x00644180: 'Fatal(uint,char*,char*) -- report and stop',
+}
+
 
 # --------------------------------------------------------------------------
 def c_name(entry):
@@ -132,22 +170,67 @@ def lift_function(lifter, name, insns, leaders):
     lines.append(f'    RECOMP_ENTER(0x{insns[0].address:08X}u);' if insns else '')
     lines.append('')
     lifter._flag_state = None
+    # A function containing an indirect jump needs a label on EVERY instruction,
+    # because a jump table can land anywhere and the local dispatch below has to
+    # be able to reach it.
+    has_indirect = any(i.is_uncond_jump and i.get_branch_target() is None
+                       for i in insns)
     for insn in insns:
-        if insn.address in leaders:
+        if has_indirect or insn.address in leaders:
             lines.append(f'L_{insn.address:08X}:')
         lines.append(f'    RECOMP_PC(0x{insn.address:08X}u);')
         for line in lifter.lift_instruction(insn):
-            lines.append(f'    {line}')
+            lines.append(f'    {BALANCE_CALL.sub(_balance(insn.address), line)}')
+
+    # Falling off the end is NOT the same as returning. If the last instruction
+    # is neither a `ret` nor an unconditional `jmp`, control flows into whatever
+    # follows -- the linker routinely leaves one routine's `ret` owned by the
+    # next catalogued function.
+    #
+    # A bare `return;` there silently drops that `ret`, so the dummy return
+    # address RECOMP_CALL pushed is never popped and the simulated stack leaks
+    # 4 bytes per call. That drift is invisible until something reads an
+    # argument off the shifted stack: here it cost ~584 bytes across one
+    # sprintf, whose destination pointer then pointed below the image.
+    #
+    # Tail-call the fall-through address instead, so the next function's `ret`
+    # does the pop.
     if insns and not insns[-1].is_ret:
-        lines.append('    return; /* falls through */')
+        last = insns[-1]
+        if last.is_uncond_jump:
+            lines.append('    return; /* tail call already transferred */')
+        else:
+            lines.append(f'    RECOMP_ITAIL(0x{last.end_address:08X}u);'
+                         f' /* falls through */')
+            lines.append('    return;')
+
+    # Intra-function indirect jumps (jump tables, switch statements) lift to
+    # RECOMP_ITAIL(<runtime expr>), but the dispatch table only knows function
+    # ENTRIES -- it cannot resolve a label inside this function, so the switch
+    # would break. Route indirect tail-jumps through a local dispatch first,
+    # falling back to the global one for genuine cross-function tail calls.
+    indirect = [i for i, l in enumerate(lines)
+                if 'RECOMP_ITAIL(' in l and 'RECOMP_ITAIL(0x' not in l]
+    body = '\n'.join(lines)
+    defined = sorted(set(re.findall(r'(?m)^\s*(L_[0-9A-Fa-f]{8})\s*:', body)))
+    if indirect and defined:
+        for i in indirect:
+            m = re.search(r'RECOMP_ITAIL\((.+?)\);\s*return;', lines[i])
+            if m:
+                lines[i] = (f'    {{ _itail_tgt = (uint32_t)({m.group(1)}); '
+                            f'goto _ljump; }}')
+        lines.append('  _ljump:')
+        lines.append('    switch (_itail_tgt) {')
+        for lbl in defined:
+            lines.append(f'      case 0x{int(lbl[2:], 16):08X}u: goto {lbl};')
+        lines.append('      default: RECOMP_ITAIL(_itail_tgt); return;')
+        lines.append('    }')
 
     # Cross-function jumps reference labels outside this function's range; emit
     # them as indirect tail-calls so the C compiles and dispatch resolves them
     # at runtime.
-    body = '\n'.join(lines)
-    defined = set(re.findall(r'(?m)^\s*(L_[0-9A-Fa-f]{8})\s*:', body))
-    refed = set(re.findall(r'goto\s+(L_[0-9A-Fa-f]{8})', body))
-    for lbl in sorted(refed - defined):
+    refed = set(re.findall(r'goto\s+(L_[0-9A-Fa-f]{8})', '\n'.join(lines)))
+    for lbl in sorted(refed - set(defined)):
         lines.append(f'    {lbl}: RECOMP_ITAIL(0x{int(lbl[2:], 16):08X}u); return;')
     lines.append('}')
     out = '\n'.join(lines)
@@ -167,9 +250,17 @@ def write_chunk(out, idx, chunk):
         # Compiles to nothing otherwise.
         f.write('#ifdef RECOMP_TRACE\n'
                 'extern uint32_t g_cur_pc;\n'
+                'void recomp_check_balance(uint32_t sp_before, uint32_t site);\n'
+                'void recomp_check_balance2(uint32_t sp_before, uint32_t site,\n'
+                '                           uint32_t target);\n'
                 '#define RECOMP_PC(va) (g_cur_pc = (va))\n'
+                '#define RECOMP_BALANCE(sp, site) recomp_check_balance((sp), (site))\n'
+                '#define RECOMP_BALANCE2(sp, site, tgt) '
+                'recomp_check_balance2((sp), (site), (tgt))\n'
                 '#else\n'
                 '#define RECOMP_PC(va) ((void)0)\n'
+                '#define RECOMP_BALANCE(sp, site) ((void)0)\n'
+                '#define RECOMP_BALANCE2(sp, site, tgt) ((void)0)\n'
                 '#endif\n\n')
         for code, entry, name in chunk:
             sig = entry.get('demangled') or entry['name']
@@ -267,8 +358,24 @@ def main():
     # Telling the lifter the names means a direct call emits the real symbol;
     # telling it which VAs exist means a call to anything else degrades to a
     # logged indirect call instead of an unresolved external at link time.
-    names = {va: c_name(known[va]) for va in order}
-    lifter = Lifter(iat_map=iat, func_names=names, lifted=set(order))
+    #
+    # Except for OVERRIDES. A direct RECOMP_CALL is a plain C call and never
+    # consults recomp_lookup_manual, so a runtime override of one of these would
+    # simply never fire. Withholding the VA makes every call to it indirect,
+    # which does go through the lookup -- and the manual override wins there.
+    names = {va: c_name(known[va]) for va in order if va not in OVERRIDES}
+    # precise_sbb: take `sbb r,r`'s carry from the comparison that actually set
+    # it, rather than from the lifter's running `_cf`.
+    #
+    # It is off by default in the toolbox because it regressed Fury3, but this
+    # target cannot do without it. `cmp` + `sbb eax,eax` is how the MSVC 6 CRT
+    # turns a comparison into -1/0/+1, and both memcmp and strcmp end that way.
+    # With the stale carry, memcmp reported two identical buffers as different,
+    # so the config parser found none of its keys in a file it had read
+    # correctly. src/runtime's --selftest is the arbiter: it exercises these
+    # routines against the host's answers, and it goes from 2 failures to 0.
+    lifter = Lifter(iat_map=iat, func_names=names,
+                    lifted=set(order) - set(OVERRIDES), precise_sbb=True)
 
     all_entries, stats, chunk = [], [], []
     errors = idx = 0

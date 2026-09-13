@@ -155,6 +155,9 @@ static uint32_t sim_put_str(const char* s) {
     return sim_put(s, (uint32_t)strlen(s) + 1);
 }
 
+/* Same thing, for the CRT self-test in the runtime. */
+uint32_t shims_put_str(const char* s) { return sim_put_str(s); }
+
 /* Copy into a caller-provided buffer, returning what the Win32 convention
  * wants: the length written, excluding the terminator. */
 static uint32_t sim_copy_out(uint32_t buf, uint32_t cap, const char* s) {
@@ -284,8 +287,6 @@ void imp_HeapAlloc(void) {
         fprintf(stderr, "[shims] HeapAlloc(%u) exhausted the arena\n", size);
         g_last_error = ERROR_NOT_ENOUGH_MEMORY;
     }
-    if (g_alloc_count < 24)
-        fprintf(stderr, "[alloc] HeapAlloc(%u) -> %08X\n", size, p);
     RET(p);
     STDRET(3);
 }
@@ -347,9 +348,7 @@ void imp_VirtualAlloc(void) {
         STDRET(4);
         return;
     }
-    uint32_t vp = virt_alloc(size);
-    fprintf(stderr, "[alloc] VirtualAlloc(NULL, %u) -> %08X\n", size, vp);
-    RET(vp);
+    RET(virt_alloc(size));
     STDRET(4);
 }
 

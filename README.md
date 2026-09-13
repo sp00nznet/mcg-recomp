@@ -227,25 +227,67 @@ through `GetProcAddress`, which never appear in the import table at all.
   is about to execute (free without `-DRECOMP_TRACE`), which turned "somewhere
   in this 777-byte function" into an exact address, twice.
 
+### Two lifter bugs the engine found, and the test that named them
+
+The engine read `system.cfg` correctly — the right bytes, verified in the
+buffer — and then reported that every key in it was missing. When the I/O is
+provably fine, the suspect is what the parser runs *on top of*: the CRT's
+hand-written string routines, which lean on exactly the flag semantics a lifter
+is most likely to get subtly wrong.
+
+`mcg_recomp --selftest` calls each lifted routine with known inputs and compares
+against the host's answer for the same inputs, so a failure names a function
+instead of leaving a parser that "just doesn't work". It found two:
+
+- **`cmp` and `sub` never published CF.** The lazy flag model served the
+  `jcc`/`setcc` that ask by condition, but `sbb r, r` reads the running `_cf`
+  directly — and that held whatever an unrelated earlier instruction left there.
+  `cmp` + `sbb eax, eax` is exactly how the MSVC 6 CRT turns a comparison into
+  −1/0/+1, so **`strcmp` returned the wrong sign**.
+- **`repe cmpsd` was unimplemented** — only the byte forms of `cmps`/`scas`
+  existed, so it lifted to an empty statement. That is the aligned fast path in
+  `memcmp`, which then returned whatever was in `eax`: **`memcmp` called two
+  identical buffers different.** Hence a parser that could not find a key in a
+  file it had just read.
+
+Both are fixed in [pcrecomp]'s `lift32.py`, each with new cases in the
+differential harness. That suite went from **70/74 with 4 known divergences to
+82/85 with 3 and 0 failures** — the `sbb` idiom divergence it had carried as a
+documented ceiling is now simply correct.
+
+With the config parsed, startup proceeds: the game creates its directories,
+reads file times, registers its window class and enters `systemInit`.
+
 ### Where it stops
 
-In the game's **own** error path: `FatalMsg()` from `L:\mcx\Lib\aError.cpp`
-calls `sprintf` with a destination pointer of `0x0015xxxx`, below the image, and
-the fault is `sprintf` writing its NUL terminator. So the engine started, decided
-something was wrong, and crashed while formatting the message that would have
-said what. Finding where that buffer comes from is the next step — and the
-message itself is the prize, since it is the game explaining what it needs.
+`systemInit` (`HonorB.obj`) makes a C++ virtual call through an object whose
+vtable pointer is garbage — so an object is being used before its constructor
+ran. That points at the one open item below.
 
-Ruled out already, so as not to be retried: the environment block (the host's
-real one is now passed through) and `GetTimeZoneInformation` leaving its struct
-stale (now implemented). Neither changed the fault.
+Open, and honestly open rather than fixed:
 
-Also unresolved rather than fixed: lifted `__sbh_alloc_block` faults building a
-block footer from a local that holds a pointer where a size belongs. The runtime
-sets `___sbh_threshold` to 0 — the CRT's own switch, what `_set_sbh_threshold()`
-writes — so every allocation goes to `HeapAlloc` instead. That is a supported
-MSVC 6 configuration, not a patch to the game, but the SBH path is a sidestep
-and stays on the open list.
+- **A stack over-pop inside `_initterm`'s constructor loop.** `pop esi`
+  retrieves the dummy return address instead of the saved `esi`, so `esp` is 4
+  too *high*. The canary caught it (`RECOMP_RETADDR=0xDEAD0000` turned up in
+  `esi`, which is how the single-instance check came to believe another copy was
+  running), but the call-site balance check cannot see it: that check looks for
+  `esp` too *low*, the signature of a dropped `ret`. The build defaults to
+  `RECOMP_RETADDR=0` so a leaked zero is inert and bring-up continues; that is a
+  mitigation, not a fix.
+- **Lifted `__sbh_alloc_block`** faults building a block footer from a local
+  that holds a pointer where a size belongs. The runtime sets `___sbh_threshold`
+  to 0 — the CRT's own switch, what `_set_sbh_threshold()` writes — so
+  allocation goes to `HeapAlloc` instead. A supported MSVC 6 configuration, but
+  a sidestep.
+- **x87 80-bit values.** `$I10_OUTPUT`/`__fltout` read an extended value's raw
+  bytes, and the lifter models the x87 stack as a 64-bit C `double`, so `%f`
+  cannot round-trip. The engine's two error reporters are overridden in
+  `recomp_lookup_manual()` to print their message and skip the float, because
+  the message is the point.
+
+Ruled out, so as not to be retried: the environment block (the host's real one
+is passed through now) and `GetTimeZoneInformation` leaving its struct stale
+(implemented now). Neither was the cause of anything.
 
 ## Layout
 

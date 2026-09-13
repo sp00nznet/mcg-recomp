@@ -58,6 +58,75 @@ uint32_t g_enter_idx = 0;
 uint32_t g_cur_pc = 0;
 #endif
 
+/*
+ * Call-site stack balance check (trace builds only).
+ *
+ * RECOMP_CALL pushes the dummy return address; the callee's `ret` pops it, plus
+ * its arguments for a stdcall. So esp after a call is never lower than before
+ * it. If it is, the callee never popped -- 4 bytes leak per call, and the
+ * symptom surfaces much later as the poison value turning up in a register that
+ * was supposed to be callee-saved. Reporting at the call site turns "something,
+ * somewhere, earlier" into one address.
+ *
+ * Reports each offending site once, so a leak in a hot function says its name
+ * instead of scrolling the log away.
+ */
+#define BALANCE_SEEN_MAX 64
+static uint32_t g_balance_seen[BALANCE_SEEN_MAX];
+static uint32_t g_balance_seen_n;
+
+static int balance_first_time(uint32_t site) {
+    for (uint32_t i = 0; i < g_balance_seen_n; i++)
+        if (g_balance_seen[i] == site) return 0;
+    if (g_balance_seen_n < BALANCE_SEEN_MAX)
+        g_balance_seen[g_balance_seen_n++] = site;
+    return 1;
+}
+
+/* Indirect form: the callee's VA is known here, so the report names the
+ * function rather than only the dispatch site it went through. */
+void recomp_check_balance2(uint32_t sp_before, uint32_t site, uint32_t target) {
+#if RECOMP_RETADDR
+    if ((g_ebx == RECOMP_RETADDR || g_esi == RECOMP_RETADDR ||
+         g_edi == RECOMP_RETADDR || g_ebp == RECOMP_RETADDR)
+        && balance_first_time(site)) {
+        fprintf(stderr, "[poison] after indirect call at 0x%08X -> 0x%08X: "
+                "ebx=%08X esi=%08X edi=%08X ebp=%08X\n",
+                site, target, g_ebx, g_esi, g_edi, g_ebp);
+        return;
+    }
+#endif
+    uint32_t low = sp_before - g_esp;
+    if (g_esp < sp_before && low <= 16 && balance_first_time(site))
+        fprintf(stderr, "[stack-leak] indirect call at 0x%08X -> 0x%08X left "
+                        "esp %u bytes low\n", site, target, low);
+}
+
+void recomp_check_balance(uint32_t sp_before, uint32_t site) {
+    /* The poison is the real prize. RECOMP_RETADDR is a value no program would
+     * compute, so finding it in a register the callee was supposed to preserve
+     * names the exact call that lost it -- which beats discovering it later as
+     * a nonsense pointer somewhere unrelated. */
+#if RECOMP_RETADDR
+    if ((g_ebx == RECOMP_RETADDR || g_esi == RECOMP_RETADDR ||
+         g_edi == RECOMP_RETADDR || g_ebp == RECOMP_RETADDR)
+        && balance_first_time(site)) {
+        fprintf(stderr, "[poison] after call at 0x%08X: "
+                "ebx=%08X esi=%08X edi=%08X ebp=%08X\n",
+                site, g_ebx, g_esi, g_edi, g_ebp);
+        return;
+    }
+#endif
+    /* A dropped `ret` leaks one slot, occasionally a few. A large drop is a
+     * callee that deliberately allocates for its caller -- __chkstk hands back
+     * hundreds of bytes and is doing exactly its job -- so only small,
+     * slot-sized shortfalls are worth reporting. */
+    uint32_t low = sp_before - g_esp;
+    if (g_esp < sp_before && low <= 16 && balance_first_time(site))
+        fprintf(stderr, "[stack-leak] call at 0x%08X returned with esp %u bytes "
+                        "low (%08X -> %08X)\n", site, low, sp_before, g_esp);
+}
+
 /* Everything worth printing when something faults, in one place. */
 static void report_extra(void) {
 #ifdef RECOMP_TRACE
@@ -159,11 +228,55 @@ recomp_func_t recomp_lookup(uint32_t va) {
     return NULL;
 }
 
-/* Hand-installed overrides, for bisecting a bad lift during bring-up: point one
- * VA at a hand-written body without regenerating anything. Empty by design. */
+/*
+ * Hand-installed overrides: point one VA at a hand-written body without
+ * regenerating anything.
+ *
+ * The two here are the engine's own error reporters, from L:\mcx\Lib\aError.cpp.
+ * They are intercepted not because their lift is wrong but because of what they
+ * do on the way: both sprintf the message together with a float, and %f goes
+ * through the CRT's x87 path ($I10_OUTPUT, __fltout, __fptostr), which reads an
+ * 80-bit extended value's raw bytes. The lifter models the x87 stack as a 64-bit
+ * C double, so that conversion cannot round-trip and the formatting derails
+ * before the message is ever printed.
+ *
+ * The message is the point -- it is the game explaining what it could not find.
+ * So take the char* and print it, and skip the float entirely.
+ *
+ * Both are __cdecl: the caller cleans the arguments, so the epilogue pops only
+ * the dummy return address.
+ */
+static void mcg_report_msg(const char* kind) {
+    uint32_t msg = MEM32(g_esp + 4);
+    fprintf(stderr, "[game:%s] %s\n", kind,
+            msg ? (const char*)ADDR(msg) : "(null)");
+    g_esp += 4;
+}
+
+static void mcg_FatalMsg(void)   { mcg_report_msg("fatal"); }
+static void mcg_GeneralMsg(void) { mcg_report_msg("msg"); }
+
+/* void __cdecl Fatal(unsigned int code, char* a, char* b)
+ *
+ * Despite the name it RETURNS: it puts up a dialog and, unless the user asks to
+ * break, carries on ("Could not find systemHeap. Using Defaults." is one of its
+ * messages). So this reports and returns too -- exiting here would stop the
+ * game somewhere the original would have kept going. */
+static void mcg_Fatal(void) {
+    uint32_t code = MEM32(g_esp + 4);
+    uint32_t a = MEM32(g_esp + 8), b = MEM32(g_esp + 12);
+    fprintf(stderr, "[game:Fatal] code=0x%08X  \"%s\"  \"%s\"\n", code,
+            a ? (const char*)ADDR(a) : "", b ? (const char*)ADDR(b) : "");
+    g_esp += 4;
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
-    (void)va;
-    return NULL;
+    switch (va) {
+    case 0x006440B0u: return mcg_GeneralMsg;   /* GeneralMsg(char*) */
+    case 0x006440D0u: return mcg_FatalMsg;     /* FatalMsg(char*)   */
+    case 0x00644180u: return mcg_Fatal;        /* Fatal(uint,char*,char*) */
+    default:          return NULL;
+    }
 }
 
 /* Import bridges. 204 entries, generated in IAT order, so a linear scan.
@@ -207,6 +320,117 @@ void mcg_install_iat(void) {
 /* ============================================================
  * Entry
  * ============================================================ */
+
+/* ============================================================
+ * Lifted-CRT self-test
+ *
+ * When the engine reads a config file correctly and still cannot find a key
+ * that is plainly in the buffer, the suspect is not the I/O -- it is one of the
+ * string primitives the parser runs on top of. These are the CRT's hand-written
+ * assembly versions (strlen reads four bytes at a time and finds the NUL with
+ * carry propagation), so they lean on exactly the flag semantics a lifter is
+ * most likely to get subtly wrong.
+ *
+ * So: call each lifted routine with known inputs and compare against the host's
+ * answer for the same inputs. A failure names the function instead of leaving a
+ * parser that "just doesn't work".
+ * ============================================================ */
+
+static uint32_t call_lifted(uint32_t va, int argc, const uint32_t* args) {
+    recomp_func_t f = recomp_lookup(va);
+    if (!f) {
+        fprintf(stderr, "  [selftest] 0x%08X not in the dispatch table\n", va);
+        return 0;
+    }
+    uint32_t save = g_esp;
+    for (int i = argc - 1; i >= 0; i--)
+        PUSH32(g_esp, args[i]);
+    PUSH32(g_esp, RECOMP_RETADDR);
+    f();
+    /* Restore rather than trust the callee's epilogue, so one bad convention
+     * cannot cascade into the next case. */
+    g_esp = save;
+    return g_eax;
+}
+
+static int g_st_fail;
+
+static void expect(const char* what, uint32_t got, uint32_t want) {
+    if (got != want) {
+        fprintf(stderr, "  [FAIL] %-34s got %08X  want %08X\n", what, got, want);
+        g_st_fail++;
+    } else {
+        fprintf(stderr, "  [ ok ] %-34s %08X\n", what, got);
+    }
+}
+
+static int sgn(int v) { return v < 0 ? -1 : (v > 0 ? 1 : 0); }
+
+static int crt_selftest(void) {
+    /* Addresses come from MCX.EXE's own symbol table. */
+    const uint32_t STRLEN = 0x0075FE10, STRCMP = 0x0075FE90;
+    const uint32_t STRSTR = 0x00761570, STRNCMP = 0x00761FB0;
+    const uint32_t MEMCMP = 0x007625D0, STRCHR = 0x007600A0;
+    const uint32_t ATOL = 0x007602BD;
+
+    /* A line shaped like the ones the config parser actually walks. */
+    const char* line = "ul SymbolTableHeapSize = 1024000";
+    uint32_t s_empty = shims_put_str("");
+    uint32_t s_a = shims_put_str("a");
+    uint32_t s_line = shims_put_str(line);
+    uint32_t s_abl = shims_put_str("[ABL]");
+    uint32_t s_hay = shims_put_str("\r\n[UseMusic]\r\n\r\n[ABL]\r\nul Symbol");
+    uint32_t s_num = shims_put_str("1024000");
+
+    fprintf(stderr, "=== lifted CRT self-test ===\n");
+
+    uint32_t a[3];
+    a[0] = s_empty; expect("strlen(\"\")", call_lifted(STRLEN, 1, a), 0);
+    a[0] = s_a;     expect("strlen(\"a\")", call_lifted(STRLEN, 1, a), 1);
+    a[0] = s_line;
+    expect("strlen(config line)", call_lifted(STRLEN, 1, a),
+           (uint32_t)strlen(line));
+
+    a[0] = s_line; a[1] = s_line;
+    expect("sgn strcmp(x,x)", (uint32_t)sgn((int)call_lifted(STRCMP, 2, a)), 0);
+    a[0] = s_a; a[1] = s_line;
+    expect("sgn strcmp(\"a\",line)",
+           (uint32_t)sgn((int)call_lifted(STRCMP, 2, a)),
+           (uint32_t)sgn(strcmp("a", line)));
+
+    /* The one the parser lives on: find a section header inside a chunk. */
+    a[0] = s_hay; a[1] = s_abl;
+    {
+        uint32_t got = call_lifted(STRSTR, 2, a);
+        const char* hay = (const char*)ADDR(s_hay);
+        const char* hit = strstr(hay, "[ABL]");
+        expect("strstr(chunk, \"[ABL]\") offset",
+               got ? got - s_hay : 0xFFFFFFFFu,
+               hit ? (uint32_t)(hit - hay) : 0xFFFFFFFFu);
+    }
+
+    a[0] = s_line; a[1] = shims_put_str("ul Symbol"); a[2] = 9;
+    expect("sgn strncmp(line,\"ul Symbol\",9)",
+           (uint32_t)sgn((int)call_lifted(STRNCMP, 3, a)), 0);
+
+    a[0] = s_line; a[1] = s_line; a[2] = (uint32_t)strlen(line);
+    expect("memcmp(x,x,n)", call_lifted(MEMCMP, 3, a), 0);
+
+    a[0] = s_line; a[1] = '=';
+    {
+        uint32_t got = call_lifted(STRCHR, 2, a);
+        const char* hit = strchr(line, '=');
+        expect("strchr(line,'=') offset", got ? got - s_line : 0xFFFFFFFFu,
+               hit ? (uint32_t)(hit - line) : 0xFFFFFFFFu);
+    }
+
+    a[0] = s_num; expect("atol(\"1024000\")", call_lifted(ATOL, 1, a), 1024000);
+
+    fprintf(stderr, "=== %s (%d failure%s) ===\n",
+            g_st_fail ? "FAILURES" : "all passed", g_st_fail,
+            g_st_fail == 1 ? "" : "s");
+    return g_st_fail ? 1 : 0;
+}
 
 int main(int argc, char** argv) {
     const char* image = (argc > 1) ? argv[1] : "MCX.EXE";
@@ -272,6 +496,10 @@ int main(int argc, char** argv) {
                 MCG_ENTRY);
         return 1;
     }
+
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--selftest"))
+            return crt_selftest();
 
     fprintf(stderr, "[runtime] entering at 0x%08X\n", MCG_ENTRY);
     PUSH32(g_esp, RECOMP_RETADDR);

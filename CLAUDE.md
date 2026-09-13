@@ -103,14 +103,64 @@ investigation that did not land) and ABL.
   `build-trace/` with `-DCMAKE_C_FLAGS=-DRECOMP_TRACE` for that plus a 1024-deep
   function-entry backtrace. It found both faults above in one run each.
 
+### Lifted-CRT self-test (reach for this first)
+`build-trace/mcg_recomp.exe MCX.EXE --selftest` calls the lifted CRT string
+routines with known inputs and compares against the host's answers. When the
+engine reads a file correctly and still cannot find what is plainly in it, run
+this BEFORE reading any more disassembly -- it named two real lifter bugs in one
+run. Add a case whenever a primitive is suspected: it is cheap, and it converts
+"the parser does not work" into a function name.
+
+### Two lifter bugs found that way (both fixed upstream in pcrecomp)
+- **`cmp`/`sub` never published `_cf`.** The lazy flag triple served jcc/setcc,
+  but `sbb r, r` reads the running `_cf` directly. `cmp` + `sbb eax,eax` is how
+  the MSVC 6 CRT makes -1/0/+1, so **strcmp returned the wrong sign**. Fixed by
+  emitting `_cf = CMP_B(_flag_a, _flag_b)` in both. This retired the
+  long-standing `sbb.idiom` KNOWN divergence in difftest.
+- **`repe cmpsd` was unimplemented** -- only byte-width `cmps`/`scas` existed,
+  so it lifted to an empty statement. That is memcmp's aligned fast path, so
+  **memcmp called two identical buffers different**, and the config parser found
+  no keys in a file it had read correctly. Replaced the three narrow handlers
+  with one covering every width, guarded by opcode (A6/A7/AE/AF) because
+  `cmpsd` is also an SSE mnemonic.
+- difftest went 70/74 (4 divergences) -> **82/85 (3 divergences), 0 failures**.
+- **`precise_sbb=True` is NOT what fixed this** and is not sufficient alone: at a
+  jump target the lifter cannot know which `cmp` set the flags, so it falls back
+  to `_cf`. It stays enabled, harmlessly.
+
+### Bring-up instrumentation (trace builds)
+- `RECOMP_PC` records each instruction's VA, so a crash report names the
+  faulting instruction and not just the function.
+- `RECOMP_BALANCE` / `RECOMP_BALANCE2` wrap every direct/indirect call and
+  report (a) the poison value turning up in a callee-saved register, naming the
+  call that lost it, and (b) esp left *low* by <= 16 bytes. A large drop is NOT
+  a leak -- `__chkstk` hands hundreds of bytes to its caller by design.
+- `recomp_lookup_manual()` overrides a VA without regenerating. NOTE: a direct
+  `RECOMP_CALL` never consults it, so an overridden VA must ALSO be withheld
+  from the lifter's `func_names`/`lifted` sets -- that is what `OVERRIDES` in
+  run_pipeline.py is for.
+
 ### Current bring-up stop
-`FatalMsg()` (`L:\mcx\Lib\aError.cpp`, 0x006440D0) calls `sprintf` with a
-destination of `0x0015xxxx` — below the image — and `sprintf` faults writing its
-NUL terminator at `0x0075F9AE`. The engine started, decided something was wrong,
-and crashed formatting the message that would say what. **Disproven, do not
-retry:** (1) the environment block being empty — the host's real one is passed
-through now; (2) `GetTimeZoneInformation` leaving its struct stale — implemented
-now. Neither changed the fault.
+`systemInit` (`HonorB.obj`, 0x007590D0) makes a C++ virtual call at 0x0075982B
+through an object whose vtable pointer is garbage — an object used before its
+constructor ran. Most likely traced to the open `_initterm` over-pop below.
+
+**Open: a stack OVER-pop inside `_initterm`'s constructor loop.** `pop esi`
+retrieves the dummy return address, so esp ends 4 too HIGH. The balance check
+cannot see it — that looks for esp too LOW, the signature of a dropped `ret`.
+The canary found it instead: with `RECOMP_RETADDR=0xDEAD0000`, esi held the
+poison at the CRT's WinMain call, so hPrevInstance was non-zero and the game
+announced "An instance of this application is already running." The build
+defaults to `RECOMP_RETADDR=0` as a MITIGATION, not a fix.
+
+**Also open:** x87 80-bit values cannot round-trip through the lifter's 64-bit
+`double`, so `%f` formatting (`$I10_OUTPUT`, `__fltout`, `__fptostr`) derails.
+The engine's two error reporters are overridden in `recomp_lookup_manual()` to
+print their message and skip the float.
+
+**Disproven, do not retry:** (1) the environment block being empty — the host's
+real one is passed through now; (2) `GetTimeZoneInformation` leaving its struct
+stale — implemented now. Neither was the cause of anything.
 
 ## Phase 1/2 (done)
 - `run_pipeline.py` drives the shared lifter: **5,760/5,760 functions, 0 lift

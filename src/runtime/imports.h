@@ -71,6 +71,7 @@ uint32_t shims_arena_end(void);
 uint32_t shims_make_tib(uint32_t stack_base, uint32_t stack_top);
 void     shims_set_program(const char* path);
 void     shims_report(void);
+uint32_t shims_put_str(const char* s);
 
 /* Region bounds, so VirtualQuery can answer without duplicating the layout. */
 uint32_t recomp_image_base(void);

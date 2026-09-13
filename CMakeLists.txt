@@ -43,14 +43,26 @@ target_include_directories(mcg_recomp PRIVATE
   "${PCRECOMP}/runtime/recomp32"       # image_loader.h, crash_report.h
 )
 
-# The dummy return address RECOMP_CALL pushes. 0xDEAD0000 is easy to spot in a
-# register dump and deliberately destructive if a stack imbalance ever leaks it
-# into a value, so the leak announces itself instead of quietly becoming a zero
-# that some null check swallows. Start poisoned -- this project has not yet had
-# a bring-up run, so there is nothing to work around, and the canary is most
-# useful before anyone knows where the problems are.
-set(RECOMP_RETADDR "0xDEAD0000u" CACHE STRING
-    "Dummy return address pushed by RECOMP_CALL; 0u to get past a known leak")
+# The dummy return address RECOMP_CALL pushes.
+#
+# 0xDEAD0000 is the canary: easy to spot in a register dump and deliberately
+# destructive, so a stack imbalance announces itself instead of quietly becoming
+# a zero that some null check swallows. It earned its place immediately -- it
+# turned up in esi during CRT startup, which is how the single-instance check
+# came to believe another copy of the game was running.
+#
+# That imbalance is an over-pop inside _initterm's constructor loop: `pop esi`
+# retrieves the dummy return address rather than the saved esi, so esp is 4 too
+# HIGH, which the call-site balance check cannot see (it looks for esp too low,
+# the signature of a dropped `ret`). Finding it is open work.
+#
+# Default to 0 meanwhile: a zero landing in a register is inert, and
+# hPrevInstance == 0 is what Win32 actually passes, so bring-up continues past
+# it. This is a MITIGATION, not a fix -- configure with
+# -DRECOMP_RETADDR=0xDEAD0000u to put the canary back whenever a value looks
+# impossible.
+set(RECOMP_RETADDR "0u" CACHE STRING
+    "Dummy return address pushed by RECOMP_CALL; 0xDEAD0000u to hunt leaks")
 target_compile_definitions(mcg_recomp PRIVATE RECOMP_RETADDR=${RECOMP_RETADDR})
 
 if(MSVC)
