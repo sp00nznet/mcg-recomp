@@ -103,6 +103,28 @@ investigation that did not land) and ABL.
   `build-trace/` with `-DCMAKE_C_FLAGS=-DRECOMP_TRACE` for that plus a 1024-deep
   function-entry backtrace. It found both faults above in one run each.
 
+### Function discovery: four sources, and why each exists
+`config/functions.json` holds only the CodeView publics. run_pipeline.py adds
+three more sources at lift time, and all three were forced by a real bug:
+1. **FPO records** (+94) -- describe a frame regardless of linkage.
+2. **Data pointer tables** (+63) -- runs of aligned dwords that are each null or
+   a .text address (constructor tables, vtables, callback tables). A static
+   constructor is never *called* from code, so nothing else can see it: the one
+   at 0x0074D4A0 never ran, and `_initterm` reported it unresolved.
+3. **Call targets, and branch targets that LEAVE a function** (+157). The second
+   half matters as much as the first: a branch out of a function lifts to
+   `RECOMP_ITAIL`, and dispatch resolves function ENTRIES only. `_strcpy` is a
+   five-byte stub -- `push edi`, then `jmp` to its real body, which sits AFTER
+   `_strcat` -- so its target is in the middle of another function. Unresolved,
+   the generated `return` left the pushed edi AND the dummy return address on
+   the stack: **exactly 8 bytes leaked per strcpy call**, which shifted every
+   later stack local and is why `systemInit` read an uninitialised vtable
+   pointer out of a stack object.
+
+Splitting a function to create such an entry is SAFE in this model: the part
+before falls through to it, and registers (ebp included) are deliberately global
+so one frame can span separately-lifted blocks.
+
 ### Lifted-CRT self-test (reach for this first)
 `build-trace/mcg_recomp.exe MCX.EXE --selftest` calls the lifted CRT string
 routines with known inputs and compares against the host's answers. When the
@@ -141,17 +163,35 @@ run. Add a case whenever a primitive is suspected: it is cheap, and it converts
   run_pipeline.py is for.
 
 ### Current bring-up stop
-`systemInit` (`HonorB.obj`, 0x007590D0) makes a C++ virtual call at 0x0075982B
-through an object whose vtable pointer is garbage — an object used before its
-constructor ran. Most likely traced to the open `_initterm` over-pop below.
+**`CreateWindowExA`**, which is still a stub, so it hands back no window and the
+engine exits cleanly. CRT startup, all 30 static constructors, the config parse,
+the media check and window-class registration all complete first. The Win32
+window + DirectX 6 HAL is Phase 4 and is the next real work.
 
-**Open: a stack OVER-pop inside `_initterm`'s constructor loop.** `pop esi`
-retrieves the dummy return address, so esp ends 4 too HIGH. The balance check
-cannot see it — that looks for esp too LOW, the signature of a dropped `ret`.
-The canary found it instead: with `RECOMP_RETADDR=0xDEAD0000`, esi held the
-poison at the CRT's WinMain call, so hPrevInstance was non-zero and the game
-announced "An instance of this application is already running." The build
-defaults to `RECOMP_RETADDR=0` as a MITIGATION, not a fix.
+**The media check, for reference.** `checkForCDInDrive()` (0x00758DA0,
+`HonorB.obj`) walks A: to Z: for a `DRIVE_CDROM`, then looks for
+`\data\tiles\gtiles90.pak` and `\hidden.txt` **from the drive root** — a 1999
+CD's root *was* the data directory, so installed in a subfolder those paths can
+never resolve. The runtime reports the install drive as the media and retries
+root-anchored paths under the install directory, only when the result exists
+(`redirect()` in shims_impl.c). Both files are the game's own and already
+present. No DRM is involved: Phase 0 found no packer, no protection indicators.
+
+**`LoadStringA` must be real.** Every message the engine shows comes through it;
+stubbed it returned 0 (a valid "not found"), so the game displayed an empty
+dialog and repeated it 43,000 times. It is answered from MCX.EXE's own `.rsrc`
+by loading the exe with `LOAD_LIBRARY_AS_DATAFILE` and calling the host's
+`LoadStringA` — no resource parsing of our own.
+
+**`_initterm` over-pop: RULED OUT, do not re-investigate.** The runtime replaces
+`_initterm` (0x00760D27) with a native probe that checks esp around every
+constructor — constructors are __cdecl with no args, so any change at all is a
+bug. It reports **30 constructors, 0 unbalanced**. The imbalance that put the
+poison into esi at the CRT's WinMain call (and so made hPrevInstance non-zero,
+producing "An instance of this application is already running") was the
+`_strcpy` 8-byte leak above, now fixed. Whether any imbalance remains is
+unmeasured: the build defaults to `RECOMP_RETADDR=0`, which makes a leak inert
+rather than visible. Rebuild with `-DRECOMP_RETADDR=0xDEAD0000u` to check.
 
 **Also open:** x87 80-bit values cannot round-trip through the lifter's 64-bit
 `double`, so `%f` formatting (`$I10_OUTPUT`, `__fltout`, `__fptostr`) derails.

@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import time
+import struct
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _pc = os.path.join('G:', os.sep, 'recomp', 'pc', 'tools', 'tools')
@@ -75,6 +76,7 @@ OVERRIDES = {
     0x006440B0: 'GeneralMsg(char*) -- print the message, skip the %f path',
     0x006440D0: 'FatalMsg(char*)   -- ditto; x87 80-bit formatting derails',
     0x00644180: 'Fatal(uint,char*,char*) -- report and stop',
+    0x00760D27: '_initterm -- probe: every ctor must leave esp exactly as found',
 }
 
 
@@ -326,6 +328,40 @@ def main():
             out[va] = min(exact_size.get(va, nxt - va), nxt - va)
         return out
 
+    # Pointer tables in data. A static constructor is never *called* from code:
+    # its address sits in a table that _initterm walks, so neither the public
+    # symbols nor a call-graph sweep can see it. MechCommander has one at
+    # 0x0074D4A0 that consequently never ran, leaving its object unconstructed
+    # and systemInit calling a virtual method through a garbage vtable pointer.
+    #
+    # These tables are runs of aligned dwords that are each either null or a
+    # .text address -- constructor tables, vtables and callback tables all have
+    # that shape, and a run of several in a row is not something data hits by
+    # accident. A lone plausible-looking dword is NOT enough: a false entry
+    # would split a real function.
+    data_ptrs = set()
+    for sec in info.sections:
+        if sec.name not in ('.rdata', '.data'):
+            continue
+        blob = pe_data[sec.raw_offset:
+                       sec.raw_offset + min(sec.virtual_size, sec.raw_size)]
+        base = info.image_base + sec.virtual_address
+        run = []
+        for off in range(0, len(blob) - 3, 4):
+            word = struct.unpack_from('<I', blob, off)[0]
+            if word == 0 or cs <= word < ce:
+                run.append(word)
+                continue
+            if len({w for w in run if w}) >= 2:
+                data_ptrs.update(w for w in run if w)
+            run = []
+        if len({w for w in run if w}) >= 2:
+            data_ptrs.update(w for w in run if w)
+    new_from_data = data_ptrs - set(known)
+    for va in new_from_data:
+        known[va] = synth(va)
+    from_data = len(new_from_data)
+
     # Only `call` targets seed discovery. A jump target is not reliably a
     # function entry -- an intra-function branch and a tail call look identical
     # here -- and a false entry would split a real function in half.
@@ -334,12 +370,32 @@ def main():
         size_of = bounds(order)
         found = set()
         for va in order:
-            insns, _ = linear_disassemble(md, code_data, cs, va, va + size_of[va])
+            hi = va + size_of[va]
+            insns, _ = linear_disassemble(md, code_data, cs, va, hi)
             for ins in insns:
-                if not ins.is_call:
-                    continue
                 t = ins.get_branch_target()
-                if t and cs <= t < ce and t not in known:
+                if not t or not (cs <= t < ce) or t in known:
+                    continue
+                if ins.is_call:
+                    found.add(t)
+                elif ins.is_jump and not (va <= t < hi):
+                    # A branch that LEAVES this function has to land on a known
+                    # entry: it lifts to RECOMP_ITAIL, and dispatch resolves
+                    # entries only. An unresolved one returns without popping,
+                    # so the dummy return address and anything the function
+                    # pushed are left behind.
+                    #
+                    # _strcpy is a five-byte stub -- `push edi` then a jump to
+                    # its real body, which sits AFTER _strcat -- so its target
+                    # is in the middle of another function. That leaked exactly
+                    # 8 bytes a call, shifting every later stack local, which is
+                    # how systemInit came to read an uninitialised vtable
+                    # pointer out of a stack object.
+                    #
+                    # Splitting the containing function here is safe: the part
+                    # before the new entry falls through to it, and registers
+                    # (ebp included) are global in this model precisely so a
+                    # frame can span separately-lifted blocks.
                     found.add(t)
         if not found:
             break
@@ -351,8 +407,8 @@ def main():
     order = sorted(known)
     size_of = bounds(order)
     print(f'[*] {len(order)} functions: {from_syms} CodeView publics, '
-          f'+{from_fpo} FPO-only, '
-          f'+{len(order) - from_syms - from_fpo} statics via the call graph')
+          f'+{from_fpo} FPO-only, +{from_data} from data pointer tables, '
+          f'+{len(order) - from_syms - from_fpo - from_data} via the call graph')
 
     entries = [dict(known[va], size=size_of[va]) for va in order]
     # Telling the lifter the names means a direct call emits the real symbol;

@@ -178,8 +178,65 @@ static uint32_t g_cmdline_va = 0;
 static uint32_t g_env_va = 0;
 static uint32_t g_last_error = 0;
 
+/* MCX.EXE loaded as a plain datafile, purely so the host's own resource loader
+ * can answer LoadStringA out of the game's .rsrc. No code is mapped or run --
+ * LOAD_LIBRARY_AS_DATAFILE only makes the resources readable. */
+static HMODULE g_resources;
+
+static char g_install_dir[MAX_PATH];
+
+/*
+ * Root-anchored paths resolve against the install directory.
+ *
+ * checkForCDInDrive() probes `\data\tiles\gtiles90.pak` and `\hidden.txt` --
+ * paths built from a drive ROOT, because in 1999 the content was on a CD whose
+ * root *was* the data directory. Installed into a subfolder, those can never
+ * resolve, and the engine stops at "Please insert the MechCommander Expansion
+ * compact disc" no matter what is actually on the machine.
+ *
+ * So a path starting at a root is retried under the install directory, and only
+ * when the result actually exists; anything else passes through untouched. This
+ * answers "where does my content live", which is all the check is asking --
+ * MCX.EXE carries no DRM of any kind (Phase 0 found no packer and no protection
+ * indicators), and both files it wants are the game's own, sitting right there.
+ */
+static const char* redirect(const char* name, char* buf, size_t cap) {
+    const char* rel = NULL;
+    if (!name || !g_install_dir[0])
+        return name;
+    if (name[0] == '\\' || name[0] == '/')
+        rel = name + 1;
+    else if (name[0] && name[1] == ':' && (name[2] == '\\' || name[2] == '/'))
+        rel = name + 3;
+    if (!rel)
+        return name;
+    snprintf(buf, cap, "%s%s", g_install_dir, rel);
+    return GetFileAttributesA(buf) != INVALID_FILE_ATTRIBUTES ? buf : name;
+}
+
 void shims_set_program(const char* path) {
     GetFullPathNameA(path, MAX_PATH, g_program, NULL);
+    snprintf(g_install_dir, sizeof g_install_dir, "%s", g_program);
+    for (char* p = g_install_dir + strlen(g_install_dir); p > g_install_dir; p--)
+        if (p[-1] == '\\' || p[-1] == '/') { *p = 0; break; }
+    g_resources = LoadLibraryExA(g_program, NULL, LOAD_LIBRARY_AS_DATAFILE);
+    if (!g_resources)
+        fprintf(stderr, "[shims] no resources from %s (%lu)\n",
+                g_program, GetLastError());
+}
+
+/* The engine loads every message it shows through this. Stubbed, it returned 0
+ * -- a valid "string not found" -- so the game put up an empty dialog, and then
+ * did it again 43,000 times. */
+void imp_LoadStringA(void) {
+    char tmp[1024];
+    int n = g_resources ? LoadStringA(g_resources, ARG(1), tmp, sizeof tmp) : 0;
+    if (n > 0 && ARG(2) && ARG(3))
+        n = (int)sim_copy_out(ARG(2), ARG(3), tmp);
+    else if (n <= 0 && ARG(2) && ARG(3))
+        MEM8(ARG(2)) = 0;              /* never leave the buffer stale */
+    RET(n > 0 ? (uint32_t)n : 0);
+    STDRET(4);
 }
 
 void imp_GetCommandLineA(void) {
@@ -465,9 +522,17 @@ void imp_CloseHandle(void) {
 
 void imp_CreateFileA(void) {
     const char* name = ARG(0) ? (const char*)ADDR(ARG(0)) : NULL;
+    char redirected[MAX_PATH];
+    name = redirect(name, redirected, sizeof redirected);
     HANDLE h = CreateFileA(name, ARG(1), ARG(2), NULL, ARG(4), ARG(5), NULL);
     if (h == INVALID_HANDLE_VALUE) {
         g_last_error = GetLastError();
+        static int shown;         /* only the misses: they say what is sought */
+        if (shown < 24) {
+            fprintf(stderr, "[media] CreateFileA(\"%s\") MISS\n",
+                    name ? name : "(null)");
+            shown++;
+        }
         RET(0xFFFFFFFFu);
     } else {
         RET(put_handle(g_files, H_FILE_TAG, h));
@@ -539,7 +604,9 @@ void imp_SetEndOfFile(void) {
 }
 
 void imp_GetFileAttributesA(void) {
-    RET(ARG(0) ? GetFileAttributesA((const char*)ADDR(ARG(0)))
+    char buf[MAX_PATH];
+    RET(ARG(0) ? GetFileAttributesA(
+                     redirect((const char*)ADDR(ARG(0)), buf, sizeof buf))
                : INVALID_FILE_ATTRIBUTES);
     STDRET(1);
 }
@@ -828,9 +895,26 @@ void imp_GetTempPathA(void) {
     STDRET(2);
 }
 
-/* The game checks this to find its CD. Report the truth about the host. */
+/*
+ * The engine walks A: to Z: looking for a drive that reports DRIVE_CDROM, then
+ * looks for its data there. On a machine with no optical drive -- which is most
+ * of them now -- it finds none and stops at "Please insert the MechCommander
+ * Expansion compact disc".
+ *
+ * The data is not on a disc here; it is in the install directory, which is
+ * where the game is being run from. So the drive holding the install answers
+ * "that is the media" and every other drive answers truthfully. This is a media
+ * PATH question, not a protection one: MCX.EXE has no DRM of any kind (no
+ * packer, no protection indicators -- see the Phase 0 notes), and the check is
+ * simply the 1999 way of asking where the content lives.
+ */
 void imp_GetDriveTypeA(void) {
-    RET(ARG(0) ? GetDriveTypeA((LPCSTR)ADDR(ARG(0))) : DRIVE_UNKNOWN);
+    const char* q = ARG(0) ? (const char*)ADDR(ARG(0)) : NULL;
+    UINT t = q ? GetDriveTypeA(q) : DRIVE_UNKNOWN;
+    if (q && g_program[0] &&
+        (q[0] | 32) == (g_program[0] | 32) && q[1] == ':')
+        t = DRIVE_CDROM;
+    RET(t);
     STDRET(1);
 }
 
@@ -982,9 +1066,13 @@ void imp_GetProcAddress(void) {
  * ============================================================ */
 
 void imp_MessageBoxA(void) {
-    fprintf(stderr, "[MessageBox] %s | %s\n",
-            ARG(2) ? (const char*)ADDR(ARG(2)) : "(no caption)",
-            ARG(1) ? (const char*)ADDR(ARG(1)) : "(no text)");
+    static int shown;
+    if (shown < 3) {
+        fprintf(stderr, "[MessageBox] from 0x%08X: %s | %s\n", g_cur_func,
+                ARG(2) ? (const char*)ADDR(ARG(2)) : "(no caption)",
+                ARG(1) ? (const char*)ADDR(ARG(1)) : "(no text)");
+        shown++;
+    }
     RET(1);                               /* IDOK */
     STDRET(4);
 }

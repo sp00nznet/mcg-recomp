@@ -258,22 +258,75 @@ documented ceiling is now simply correct.
 With the config parsed, startup proceeds: the game creates its directories,
 reads file times, registers its window class and enters `systemInit`.
 
-### Where it stops
+### Function discovery needs four sources, and each was forced by a bug
 
-`systemInit` (`HonorB.obj`) makes a C++ virtual call through an object whose
-vtable pointer is garbage — so an object is being used before its constructor
-ran. That points at the one open item below.
+The CodeView publics cover 98.7% of `.text`, and the missing fraction is not
+inert — it is where the bugs were:
+
+| Source | Adds | Why nothing else finds it |
+|--------|-----:|---------------------------|
+| CodeView publics | 5,760 | — |
+| FPO records | +94 | describe a frame regardless of linkage |
+| **Data pointer tables** | +63 | a static constructor is never *called*; its address only sits in a table `_initterm` walks |
+| **Call targets + branches that leave a function** | +157 | see below |
+
+Two of those were found by running, not by reading:
+
+- **A static constructor at `0x0074D4A0` never ran.** `_initterm` reported it
+  unresolved, because nothing referenced it except a table in `.data`.
+- **`_strcpy` leaked 8 bytes per call.** It is a five-byte stub — `push edi`,
+  then `jmp` to its real body, which sits *after* `_strcat` — so its jump target
+  is in the middle of another function. A branch leaving a function lifts to
+  `RECOMP_ITAIL`, and dispatch resolves function *entries* only; unresolved, the
+  generated `return` left the pushed `edi` **and** the dummy return address on
+  the stack. That shifted every later stack local, which is how `systemInit`
+  came to read an uninitialised vtable pointer out of a stack object.
+
+Splitting a function to create such an entry is safe here: the part before it
+falls through to it, and registers (`ebp` included) are deliberately global so
+one frame can span separately-lifted blocks.
+
+### How far it gets
+
+```
+[runtime] mapped MCX.EXE at 0x00600000, 2.1 MB
+[initterm] 5 constructors, 0 unbalanced
+[initterm] 26 constructors, 0 unbalanced      <- all of them, none unresolved
+          ... config parsed, no missing keys ...
+[import-stub] RegisterClassA
+[import-stub] SetRect
+[import-stub] CreateWindowExA                 <- and exits cleanly: no window yet
+```
+
+CRT startup, every static constructor, the config parse, the media check and
+window-class registration all complete, and the engine exits cleanly when
+`CreateWindowExA` (still a stub) hands back no window. Implementing the Win32
+window and DirectX 6 HAL is Phase 4.
+
+**The media check.** `checkForCDInDrive()` — the binary names it itself — walks
+`A:` to `Z:` for a drive reporting `DRIVE_CDROM`, then looks for
+`\data\tiles\gtiles90.pak` and `\hidden.txt` **from the drive root**, because in
+1999 the content was on a disc whose root *was* the data directory. Installed
+into a subfolder, those paths cannot resolve on any machine. The runtime answers
+the question it is really asking — where does the content live — by reporting
+the install drive as the media and retrying root-anchored paths under the
+install directory, and only when the result exists. Both files it wants are the
+game's own, already present. (`MCX.EXE` carries no DRM: Phase 0 found no packer
+and no protection indicators.)
+
+### Where it stops
 
 Open, and honestly open rather than fixed:
 
-- **A stack over-pop inside `_initterm`'s constructor loop.** `pop esi`
-  retrieves the dummy return address instead of the saved `esi`, so `esp` is 4
-  too *high*. The canary caught it (`RECOMP_RETADDR=0xDEAD0000` turned up in
-  `esi`, which is how the single-instance check came to believe another copy was
-  running), but the call-site balance check cannot see it: that check looks for
-  `esp` too *low*, the signature of a dropped `ret`. The build defaults to
-  `RECOMP_RETADDR=0` so a leaked zero is inert and bring-up continues; that is a
-  mitigation, not a fix.
+- **A stack imbalance reaching the CRT's `WinMain` call**, which put the poison
+  value into `esi` — and since the CRT passes `esi` as `hPrevInstance`, the game
+  concluded another copy was running. `_initterm`'s constructor loop was the
+  prime suspect and has been **ruled out**: replacing `_initterm` with a native
+  probe that checks `esp` around every constructor reports *30 constructors, 0
+  unbalanced*. The `_strcpy` leak above was one real contributor; whether any
+  imbalance remains here is unmeasured, because the build defaults to
+  `RECOMP_RETADDR=0`, which makes a leak inert rather than visible. Rebuild with
+  `-DRECOMP_RETADDR=0xDEAD0000u` to put the canary back.
 - **Lifted `__sbh_alloc_block`** faults building a block footer from a local
   that holds a pointer where a size belongs. The runtime sets `___sbh_threshold`
   to 0 — the CRT's own switch, what `_set_sbh_threshold()` writes — so

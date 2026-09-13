@@ -270,8 +270,54 @@ static void mcg_Fatal(void) {
     g_esp += 4;
 }
 
+/*
+ * void __cdecl _initterm(void (**start)(void), void (**end)(void))
+ *
+ * Walks the C++ static-constructor table and calls each non-null entry. It is
+ * replaced here as a PROBE, not because its lift is wrong: the constructors it
+ * calls take no arguments and are __cdecl, so esp must come back exactly where
+ * it started for every one of them. That is an invariant the generic call-site
+ * check cannot assert -- for an arbitrary callee a raised esp is just a stdcall
+ * cleaning up its arguments -- but here any change at all is a bug, and this
+ * says which constructor caused it.
+ *
+ * That matters because something in this loop over-pops: `pop esi` in the real
+ * _initterm retrieves the dummy return address instead of the saved esi.
+ */
+static void mcg_initterm(void) {
+    uint32_t start = MEM32(g_esp + 4);
+    uint32_t end = MEM32(g_esp + 8);
+    uint32_t n = 0, bad = 0;
+
+    for (uint32_t p = start; p < end; p += 4) {
+        uint32_t fn = MEM32(p);
+        if (!fn)
+            continue;
+        recomp_func_t f = recomp_lookup_manual(fn);
+        if (!f) f = recomp_lookup(fn);
+        if (!f) f = recomp_lookup_import(fn);
+        if (!f) {
+            fprintf(stderr, "[initterm] unresolved constructor 0x%08X\n", fn);
+            continue;
+        }
+        uint32_t sp = g_esp;
+        PUSH32(g_esp, RECOMP_RETADDR);
+        f();
+        n++;
+        if (g_esp != sp) {
+            bad++;
+            fprintf(stderr, "[initterm] ctor 0x%08X left esp %+d (%08X -> %08X)\n",
+                    fn, (int)(g_esp - sp), sp, g_esp);
+            g_esp = sp;          /* keep going: report them all, not just one */
+        }
+    }
+    fprintf(stderr, "[initterm] %u constructors, %u unbalanced\n", n, bad);
+    g_esp += 4;                  /* __cdecl: the caller cleans the arguments */
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     switch (va) {
+    case 0x00760D27u: return mcg_initterm;     /* _initterm */
     case 0x006440B0u: return mcg_GeneralMsg;   /* GeneralMsg(char*) */
     case 0x006440D0u: return mcg_FatalMsg;     /* FatalMsg(char*)   */
     case 0x00644180u: return mcg_Fatal;        /* Fatal(uint,char*,char*) */

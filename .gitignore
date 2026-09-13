@@ -39,3 +39,7 @@ Thumbs.db
 
 # Bring-up build trees
 build-trace/
+
+# Bring-up run logs
+run.log
+run.out
