@@ -125,6 +125,26 @@ Splitting a function to create such an entry is SAFE in this model: the part
 before falls through to it, and registers (ebp included) are deliberately global
 so one frame can span separately-lifted blocks.
 
+### The COM mocks (src/runtime/ddraw.c)
+DDRAW, DSOUND and DPLAYX each contribute exactly ONE import; everything after is
+vtable dispatch. So the mock is an object graph in SIMULATED memory whose vtable
+slots are synthetic VAs (0x12000000+), resolved by ddraw_lookup() from
+recomp_lookup_import. Same mechanism as the imagehlp runtime exports, different
+range.
+- **IDirectDraw2 needs its own vtable**, not a cast: SetDisplayMode takes two
+  more args and GetAvailableVidMem is appended. The engine calls
+  DirectDrawCreate then immediately QueryInterface({B3A6F3E0..}).
+- **Presenting**: the engine locks a surface, writes 8-bit pixels and flips, so
+  the back buffer is arena memory it draws into directly; present() does the
+  palette lookup into a 32-bit DIB and one BitBlt/StretchBlt to the window.
+- **Unimplemented vtable slots stay NULL on purpose.** An unimplemented COM
+  method has no argument count to guess, and a wrong STDRET desyncs the stack
+  silently; a null slot gets reported by address instead.
+- DirectSound is silent: buffers are real arena memory the engine can lock and
+  fill, never played. Wiring them to host audio changes nothing above that line.
+- DirectPlay reports no network providers (EnumConnections returns DP_OK without
+  invoking the callback), which is true here.
+
 ### Lifted-CRT self-test (reach for this first)
 `build-trace/mcg_recomp.exe MCX.EXE --selftest` calls the lifted CRT string
 routines with known inputs and compares against the host's answers. When the

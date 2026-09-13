@@ -33,6 +33,7 @@ add_executable(mcg_recomp
   src/runtime/imports_gen.c
   src/runtime/recomp_runtime.c
   src/runtime/shims_impl.c
+  src/runtime/ddraw.c
   "${PCRECOMP}/runtime/recomp32/image_loader.c"
   "${PCRECOMP}/runtime/recomp32/crash_report.c"
 )

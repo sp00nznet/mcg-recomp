@@ -430,7 +430,9 @@ recomp_func_t recomp_lookup_import(uint32_t va) {
     if (va >= DYN_VA_BASE &&
         (va - DYN_VA_BASE) / 4u < mcg_dyn_export_count && !(va & 3u))
         return mcg_dyn_exports[(va - DYN_VA_BASE) / 4u].func;
-    return NULL;
+    /* COM methods: the DirectDraw object graph's vtable slots live in their own
+     * range above this one. */
+    return ddraw_lookup(va);
 }
 
 void mcg_install_iat(void) {

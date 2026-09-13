@@ -72,6 +72,15 @@ uint32_t shims_make_tib(uint32_t stack_base, uint32_t stack_top);
 void     shims_set_program(const char* path);
 void     shims_report(void);
 uint32_t shims_put_str(const char* s);
+uint32_t shims_alloc(uint32_t n);
+void*    shims_handle(uint32_t v);   /* 32-bit handle -> host pointer */
+
+/* The DirectDraw mock (ddraw.c): one COM object graph built in simulated
+ * memory, whose vtable slots are synthetic VAs the dispatcher resolves. */
+uint32_t      ddraw_create(void);
+uint32_t      dsound_create(void);
+uint32_t      dplay_lobby_create(void);
+recomp_func_t ddraw_lookup(uint32_t va);   /* resolves every COM method VA */
 
 /* Region bounds, so VirtualQuery can answer without duplicating the layout. */
 uint32_t recomp_image_base(void);

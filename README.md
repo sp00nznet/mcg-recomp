@@ -286,6 +286,39 @@ Splitting a function to create such an entry is safe here: the part before it
 falls through to it, and registers (`ebp` included) are deliberately global so
 one frame can span separately-lifted blocks.
 
+### The COM layer: DirectDraw, DirectSound, DirectPlay
+
+The engine imports exactly one symbol from each of DDRAW, DSOUND and DPLAYX
+(`DirectDrawCreate`, and the other two by ordinal). Everything after that is COM
+vtable dispatch, so there is no import to shim — what is needed is an object
+graph in **simulated** memory whose vtable slots are addresses the dispatcher
+can resolve back to C.
+
+That reuses the mechanism the `imagehlp` exports already needed: each method
+gets a synthetic VA, the vtable is an array of those VAs built in the arena, and
+`recomp_lookup_import` maps them back. A lifted `call dword ptr [eax + 0x54]`
+then lands in `dd_SetDisplayMode`. The whole DirectDraw startup now runs:
+
+```
+[ddraw] DirectDrawCreate -> object 0x018BF4A0
+[ddraw] QueryInterface {B3A6F3E0...} -> IDirectDraw2     <- IID_IDirectDraw2
+[ddraw] SetCooperativeLevel(flags=00000013)
+[ddraw] SetDisplayMode2 1280x1024 8bpp
+[ddraw] CreateSurface 1280x1024 caps=00004218 back=1
+[ddraw] present target 1280x1024                          <- a frame composited
+[dsound] DirectSoundCreate -> object (silent)
+```
+
+MechCommander is a software renderer: it locks a surface, writes 8-bit pixels,
+and flips. So the back buffer is arena memory the engine draws into directly,
+and presenting is a palette lookup into a 32-bit DIB that the host BitBlts to
+the window. `IDirectDraw2` needs its own vtable rather than a cast — its
+`SetDisplayMode` takes two more arguments and `GetAvailableVidMem` is appended.
+
+Unimplemented vtable slots are left **null** on purpose. An unimplemented COM
+method has no argument count to guess, and a wrong `STDRET` desynchronises the
+stack silently, whereas a null slot is reported by address.
+
 ### How far it gets
 
 ```
@@ -298,10 +331,13 @@ one frame can span separately-lifted blocks.
 [import-stub] CreateWindowExA                 <- and exits cleanly: no window yet
 ```
 
-CRT startup, every static constructor, the config parse, the media check and
-window-class registration all complete, and the engine exits cleanly when
-`CreateWindowExA` (still a stub) hands back no window. Implementing the Win32
-window and DirectX 6 HAL is Phase 4.
+CRT startup, every static constructor, the config parse, the media check, window
+creation, the whole DirectDraw init sequence and DirectSound creation all
+complete. The engine now stops in `SessionManager::EnumerateConnections`: its
+DirectPlay lobby member (`+0x13C`) is null, the engine's own `Assert` fires
+saying so, and it then dereferences it anyway. `DirectPlayLobbyCreateA` is never
+reached, so something earlier in session-manager setup gives up first — that is
+the next thread, and the engine's assertions now print, so it will say why.
 
 **The media check.** `checkForCDInDrive()` — the binary names it itself — walks
 `A:` to `Z:` for a drive reporting `DRIVE_CDROM`, then looks for

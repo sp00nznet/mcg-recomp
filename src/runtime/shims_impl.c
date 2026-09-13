@@ -158,6 +158,10 @@ static uint32_t sim_put_str(const char* s) {
 /* Same thing, for the CRT self-test in the runtime. */
 uint32_t shims_put_str(const char* s) { return sim_put_str(s); }
 
+/* Simulated memory for the other runtime pieces (the DirectDraw mock builds
+ * its COM objects and vtables out of this). */
+uint32_t shims_alloc(uint32_t n) { return arena_alloc(n); }
+
 /* Copy into a caller-provided buffer, returning what the Win32 convention
  * wants: the length written, excluding the terminator. */
 static uint32_t sim_copy_out(uint32_t buf, uint32_t cap, const char* s) {
@@ -816,10 +820,27 @@ void imp_GetSystemTimeAsFileTime(void) {
 
 void imp_waveOutGetNumDevs(void) { RET(0); STDRET(0); }   /* 0 devices: honest */
 
+/* DPLAYX ordinal 4. Five arguments, per the decoration on the game's own
+ * import thunk (_DirectPlayLobbyCreateA@20). */
+void imp_DirectPlayLobbyCreateA(void) {
+    uint32_t obj = dplay_lobby_create();
+    if (ARG(1)) MEM32(ARG(1)) = obj;
+    RET(obj ? 0u : 0x80004005u);
+    STDRET(5);
+}
+
+/* DSOUND is imported by ordinal; the resolver names it DirectSoundCreate. */
+void imp_DirectSoundCreate(void) {
+    uint32_t obj = dsound_create();
+    if (ARG(1)) MEM32(ARG(1)) = obj;
+    RET(obj ? 0u : 0x8007000Eu);
+    STDRET(3);
+}
+
 void imp_DirectDrawCreate(void) {
-    IMPORT_STUB("DirectDrawCreate");
-    if (ARG(1)) MEM32(ARG(1)) = 0;        /* never leave the out param stale */
-    RET(0x8007000Eu);                     /* DDERR_OUTOFMEMORY: a real failure */
+    uint32_t obj = ddraw_create();
+    if (ARG(1)) MEM32(ARG(1)) = obj;      /* never leave the out param stale */
+    RET(obj ? 0u : 0x8007000Eu);          /* DD_OK, else DDERR_OUTOFMEMORY */
     STDRET(3);
 }
 
@@ -951,6 +972,10 @@ static void* h_ptr(uint32_t v) {
     uint32_t i = (v - H_OBJ_BASE) / 4;
     return (i && i < g_obj_n) ? g_objs[i] : NULL;
 }
+
+/* For the other runtime pieces: the DirectDraw mock needs the real HWND that
+ * SetCooperativeLevel is handed. */
+void* shims_handle(uint32_t v) { return h_ptr(v); }
 
 #define HWND_OF(v)  ((HWND)h_ptr(v))
 #define HDC_OF(v)   ((HDC)h_ptr(v))
