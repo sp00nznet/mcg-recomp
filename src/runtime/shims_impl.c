@@ -1438,6 +1438,14 @@ static int click_now(int* x, int* y) {
         }
         {   /* button down: hold the source briefly, then walk to the target */
             unsigned into = now - at;
+            /* Say which one, once each. "It did nothing" and "it never fired"
+             * look identical from the outside, and they are different bugs. */
+            static int said = -1;
+            if (said != i) {
+                said = i;
+                fprintf(stderr, "[input] firing %d at (%d,%d)\n",
+                        i, g_clicks[i].x, g_clicks[i].y);
+            }
             unsigned grab = hold / 4;
             if (into < grab || !g_clicks[i].drag) {
                 *x = g_clicks[i].x;

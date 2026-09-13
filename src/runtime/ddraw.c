@@ -923,7 +923,10 @@ static void dd_CreatePalette(void) {
 #define KIND_DSBUF   5
 
 #define MAX_DSBUFS 64
-typedef struct { uint32_t bytes, mem; } dsbuf_t;
+/* `cap` is what the arena block holds, `bytes` what this buffer claims to be:
+ * a released slot keeps its memory so the next buffer of the same size or
+ * smaller costs nothing. */
+typedef struct { uint32_t bytes, mem, cap; int used; } dsbuf_t;
 static dsbuf_t g_dsbuf[MAX_DSBUFS];
 static uint32_t g_dsbuf_n;
 static uint32_t g_vt_dsbuf;
@@ -971,11 +974,39 @@ static void ds_CreateSoundBuffer(void) {
     }
     uint32_t bytes = MEM32(desc + 8);
     if (!bytes) bytes = 4096;             /* a primary buffer declares none */
-    dsbuf_t* b = &g_dsbuf[g_dsbuf_n];
+
+    /*
+     * Reuse a released slot before taking a new one.
+     *
+     * SoundChannel::CreateAndLoadBuffer releases the channel's previous buffer
+     * and immediately creates its next, so every sound the game plays consumed
+     * a slot here and nothing ever gave one back. After 64 of them this
+     * returned an error, SoundChannel::CreateBuffer left [this+0x14] null, and
+     * the very next instruction dereferenced it -- so selecting a 'Mech in a
+     * mission crashed, but only once enough sounds had been played first.
+     */
+    dsbuf_t* b = NULL;
+    uint32_t idx = 0;
+    for (uint32_t i = 0; i < g_dsbuf_n; i++)
+        if (!g_dsbuf[i].used && g_dsbuf[i].cap >= bytes) { b = &g_dsbuf[i]; idx = i; break; }
+    if (!b) {
+        if (g_dsbuf_n >= MAX_DSBUFS) {
+            static int warned;
+            if (!warned) {
+                warned = 1;
+                fprintf(stderr, "[dsound] out of buffers (%u in use)\n", g_dsbuf_n);
+            }
+            RET(DDERR_INVALIDPARAMS);
+            STDRET(4);
+            return;
+        }
+        idx = g_dsbuf_n++;
+        b = &g_dsbuf[idx];
+    }
+    if (b->cap < bytes) { b->mem = shims_alloc(bytes); b->cap = bytes; }
     b->bytes = bytes;
-    b->mem = shims_alloc(bytes);
-    MEM32(out) = new_object(g_vt_dsbuf, KIND_DSBUF, g_dsbuf_n);
-    g_dsbuf_n++;
+    b->used = 1;
+    MEM32(out) = new_object(g_vt_dsbuf, KIND_DSBUF, idx);
     RET(DD_OK);
     STDRET(4);
 }
@@ -1042,6 +1073,15 @@ static void dsb_Lock(void) {
     if (ARG(6)) MEM32(ARG(6)) = 0;
     RET(DD_OK);
     STDRET(8);
+}
+
+/* A buffer's own Release, which the shared ds_Release could not be: it has to
+ * hand the slot back, or the pool above drains and never refills. */
+static void dsb_Release(void) {
+    dsbuf_t* b = dsbuf_of(ARG(0));
+    if (b) b->used = 0;          /* the arena block stays, ready to be reused */
+    RET(0);
+    STDRET(1);
 }
 
 static void dsb_Unlock(void) { RET(DD_OK); STDRET(5); }
@@ -1213,7 +1253,7 @@ uint32_t dplay_lobby_create(void) {
 
 uint32_t dsound_create(void) {
     static const recomp_func_t dsbuf_vt[] = {
-        ds_QueryInterface, ds_AddRef, ds_Release,
+        ds_QueryInterface, ds_AddRef, dsb_Release,
         dsb_GetCaps, dsb_GetCurrentPosition, dsb_GetFormat, dsb_GetVolume,
         dsb_GetPan, dsb_GetFrequency, dsb_GetStatus, dsb_Initialize,
         dsb_Lock, dsb_Play, dsb_SetCurrentPosition, dsb_SetFormat,
