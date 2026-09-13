@@ -1100,6 +1100,10 @@ static LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
     uint32_t proc = class_proc((ATOM)GetClassLongPtrA(hwnd, GCW_ATOM));
     if (!proc) return DefWindowProcA(hwnd, msg, wp, lp);
     g_wndproc_depth++;
+    /* WM_ACTIVATEAPP decides whether the engine runs or parks in WaitMessage,
+     * so its wParam is worth calling out by name. */
+    if (msg == WM_ACTIVATEAPP)
+        fprintf(stderr, "[win] WM_ACTIVATEAPP active=%u\n", (unsigned)wp);
     { static int shown; if (shown < 12) { shown++;
         fprintf(stderr, "[win] wndproc msg=%04X (depth %d)\n", msg,
                 g_wndproc_depth); } }

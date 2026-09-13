@@ -517,6 +517,9 @@ static void dd2_SetDisplayMode(void) {
         SetWindowPos(g_hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top,
                      SWP_NOMOVE | SWP_NOZORDER);
         ShowWindow(g_hwnd, SW_SHOW);
+        SetForegroundWindow(g_hwnd);       /* see the note on the DD1 version */
+        SetActiveWindow(g_hwnd);
+        SetFocus(g_hwnd);
     }
     RET(g_mode_bpp == 8 ? DD_OK : DDERR_UNSUPPORTED);
     STDRET(6);
@@ -574,6 +577,13 @@ static void dd_SetDisplayMode(void) {
         SetWindowPos(g_hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top,
                      SWP_NOMOVE | SWP_NOZORDER);
         ShowWindow(g_hwnd, SW_SHOW);
+        /* And bring it to the front. aSystem::run blocks in WaitMessage
+         * whenever the engine considers itself inactive, so a window created
+         * behind everything else pauses the game before it has drawn a frame.
+         * A title taking the display mode would have been foreground anyway. */
+        SetForegroundWindow(g_hwnd);
+        SetActiveWindow(g_hwnd);
+        SetFocus(g_hwnd);
     }
     RET(g_mode_bpp == 8 ? DD_OK : DDERR_UNSUPPORTED);
     STDRET(4);
