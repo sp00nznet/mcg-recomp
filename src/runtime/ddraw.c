@@ -106,6 +106,23 @@ static surface_t* surf_of(uint32_t obj) {
  * BitBlt. A 640x480 frame is 300K pixels; at 30 Hz that is nothing next to
  * everything else the engine is doing, and it keeps the path obvious.
  */
+/*
+ * The surface the engine is drawing into RIGHT NOW.
+ *
+ * Mission::run re-enters aSystem::resetDirectDraw, which builds a whole new
+ * primary and back buffer every time; the old ones are released but stay in
+ * this table. Taking the FIRST primary meant the window kept showing a buffer
+ * nothing had drawn into since the first reset -- which read as "the engine
+ * stopped rendering" and sent a long hunt after a widget composite that was
+ * landing correctly in a surface nobody was looking at. Search backwards.
+ */
+static surface_t* current_backbuffer(void) {
+    for (uint32_t i = g_surf_n; i-- > 0;)
+        if (g_surf[i].is_primary)
+            return g_surf[i].back >= 0 ? &g_surf[g_surf[i].back] : &g_surf[i];
+    return NULL;
+}
+
 static void present(surface_t* s) {
     if (!s || !s->bits || !g_hwnd) return;
 
@@ -129,7 +146,8 @@ static void present(surface_t* s) {
         if (!g_dib) return;
         g_dib_w = s->width;
         g_dib_h = s->height;
-        fprintf(stderr, "[ddraw] present target %ux%u\n", g_dib_w, g_dib_h);
+        fprintf(stderr, "[ddraw] present target %ux%u from bits %08X\n",
+                g_dib_w, g_dib_h, s->bits);
     }
 
     const uint8_t* src = (const uint8_t*)ADDR(s->bits);
@@ -193,6 +211,58 @@ static void present(surface_t* s) {
                     fprintf(stderr, "[ddraw]   densest arena block %08X: "
                             "%zu/65536 non-zero\n", best[k], bestn[k]);
             }
+        }
+    }
+
+    /* MCG_DUMPBMP=N writes the Nth presented frame as an 8-bit BMP. The window
+     * is stretched to fit the desktop, so anything measured off a screenshot is
+     * measured through a resample; this is the buffer itself. */
+    {
+        static long want = -2;
+        static long seen;
+        if (want == -2) {
+            const char* s = getenv("MCG_DUMPBMP");
+            want = s ? strtol(s, NULL, 0) : -1;
+        }
+        if (want >= 0 && ++seen == want) {
+          /* Both candidate framebuffers: the DirectDraw surface and the
+           * CreateDIBSection the engine made for its own GDI blit. */
+          for (int which = 0; which < 2; which++) {
+            uint32_t dbytes = 0, dib = shims_dib_bits(&dbytes);
+            const uint8_t* body = which ? (const uint8_t*)ADDR(dib) : src;
+            if (which && (!dib || dbytes < s->pitch * s->height)) continue;
+            FILE* f = fopen(which ? "frame_dib.bmp" : "frame.bmp", "wb");
+            if (f) {
+                uint32_t rowb = (s->width + 3u) & ~3u;
+                uint32_t off = 14 + 40 + 256 * 4;
+                uint32_t size = off + rowb * s->height;
+                uint8_t hdr[14 + 40] = {'B', 'M'};
+                memcpy(hdr + 2, &size, 4);
+                memcpy(hdr + 10, &off, 4);
+                uint32_t v = 40; memcpy(hdr + 14, &v, 4);
+                memcpy(hdr + 18, &s->width, 4);
+                v = (uint32_t)(-(int32_t)s->height); memcpy(hdr + 22, &v, 4);
+                uint16_t p = 1, bpp = 8;
+                memcpy(hdr + 26, &p, 2); memcpy(hdr + 28, &bpp, 2);
+                fwrite(hdr, 1, sizeof hdr, f);
+                for (int i = 0; i < 256; i++) {
+                    uint8_t e[4] = { g_pal[i].rgbBlue, g_pal[i].rgbGreen,
+                                     g_pal[i].rgbRed, 0 };
+                    fwrite(e, 1, 4, f);
+                }
+                static const uint8_t pad[4] = {0};
+                size_t nz = 0;
+                for (uint32_t y = 0; y < s->height; y++) {
+                    const uint8_t* row = body + (size_t)y * s->pitch;
+                    for (uint32_t x = 0; x < s->width; x++) if (row[x]) nz++;
+                    fwrite(row, 1, s->width, f);
+                    fwrite(pad, 1, rowb - s->width, f);
+                }
+                fclose(f);
+                fprintf(stderr, "[ddraw] wrote %s at frame %ld, %zu non-zero\n",
+                        which ? "frame_dib.bmp" : "frame.bmp", seen, nz);
+            }
+          }
         }
     }
 
@@ -479,8 +549,7 @@ static void pal_read_entries(uint32_t start, uint32_t count, uint32_t src) {
 static void pal_SetEntries(void) {
     pal_read_entries(ARG(2), ARG(3), ARG(4));
     /* A palette change repaints what is already on screen. */
-    for (uint32_t i = 0; i < g_surf_n; i++)
-        if (g_surf[i].is_primary) { present(g_surf[i].back >= 0 ? &g_surf[g_surf[i].back] : &g_surf[i]); break; }
+    present(current_backbuffer());
     RET(DD_OK);
     STDRET(5);
 }
