@@ -525,6 +525,28 @@ void imp_CloseHandle(void) {
  * File I/O, forwarded to the host's own Win32.
  * ============================================================ */
 
+/*
+ * MCG_IOLOG=1 narrates every seek and read, by file.
+ *
+ * Content the engine loads from a .FST never reaches CreateFileA under its own
+ * name -- the archive is opened once and everything after that is a seek and a
+ * read inside it. So "did it find campaign.fit" is not answerable from the
+ * misses; it is answerable from whether anything ever seeks to that packet's
+ * offset and reads its bytes.
+ */
+static char g_fnames[H_MAX][32];
+static int  g_iolog = -1;
+
+static int iolog_on(void) {
+    if (g_iolog < 0) { const char* e = getenv("MCG_IOLOG"); g_iolog = e && *e != '0'; }
+    return g_iolog;
+}
+
+static const char* fname_of(uint32_t v) {
+    uint32_t i = v & 0xFFFFu;
+    return i < H_MAX && g_fnames[i][0] ? g_fnames[i] : "?";
+}
+
 void imp_CreateFileA(void) {
     const char* name = ARG(0) ? (const char*)ADDR(ARG(0)) : NULL;
     char redirected[MAX_PATH];
@@ -543,7 +565,16 @@ void imp_CreateFileA(void) {
         }
         RET(0xFFFFFFFFu);
     } else {
-        RET(put_handle(g_files, H_FILE_TAG, h));
+        uint32_t v = put_handle(g_files, H_FILE_TAG, h);
+        uint32_t i = v & 0xFFFFu;
+        if (i < H_MAX && name) {
+            const char* base = name;
+            for (const char* p = name; *p; p++)
+                if (*p == '\\' || *p == '/') base = p + 1;
+            snprintf(g_fnames[i], sizeof g_fnames[i], "%s", base);
+        }
+        if (iolog_on()) fprintf(stderr, "[io] open %s\n", name ? name : "?");
+        RET(v);
     }
     STDRET(7);
 }
@@ -554,6 +585,9 @@ void imp_ReadFile(void) {
     BOOL ok = h ? ReadFile(h, (void*)ADDR(ARG(1)), ARG(2), &got, NULL) : FALSE;
     if (ARG(3)) MEM32(ARG(3)) = got;
     if (!ok) g_last_error = GetLastError();
+    if (iolog_on())
+        fprintf(stderr, "[io] read %s %u -> %lu%s\n", fname_of(ARG(0)),
+                ARG(2), got, ok ? "" : " FAILED");
     RET(ok ? 1 : 0);
     STDRET(5);
 }
@@ -586,6 +620,9 @@ void imp_SetFilePointer(void) {
     DWORD r = h ? SetFilePointer(h, (LONG)ARG(1), phigh, ARG(3))
                 : INVALID_SET_FILE_POINTER;
     if (ARG(2)) MEM32(ARG(2)) = (uint32_t)high;
+    if (iolog_on())
+        fprintf(stderr, "[io] seek %s %+d from %u -> %lu\n", fname_of(ARG(0)),
+                (int)ARG(1), ARG(3), r);
     RET(r);
     STDRET(4);
 }
@@ -1670,6 +1707,40 @@ void imp_SelectPalette(void)  { RET(h_put(SelectPalette(HDC_OF(ARG(0)), (HPALETT
 void imp_RealizePalette(void) { RET(RealizePalette(HDC_OF(ARG(0)))); STDRET(1); }
 void imp_AnimatePalette(void) { RET(AnimatePalette((HPALETTE)h_ptr(ARG(0)), ARG(1), ARG(2), (const PALETTEENTRY*)simp(ARG(3))) ? 1 : 0); STDRET(4); }
 void imp_GetSystemPaletteEntries(void) { RET(GetSystemPaletteEntries(HDC_OF(ARG(0)), ARG(1), ARG(2), (LPPALETTEENTRY)simp(ARG(3)))); STDRET(4); }
+
+/*
+ * SmackOpen -- a movie that is already over.
+ *
+ * A Smack begins with Version, Width, Height, Frames and MSPerFrame, and the
+ * engine reads the width and height straight back out with no null check at
+ * all: BriefingScreen::setUpOperation calls this and then does
+ * `mov eax, [edi + 8]` on the result. So the generated stub's NULL is not a
+ * safe answer -- it faults the instant a briefing starts.
+ *
+ * Hand back a real, zeroed structure describing a one-frame movie that is
+ * already on its last frame. Every "is it finished yet" the engine asks then
+ * answers yes, the briefing window gets a sane size, and no pixel is ever
+ * decoded. One buffer serves every open, because nothing reads it back.
+ *
+ * ponytail: no decoder. The .smk files are on the disc and decoding them is a
+ * project of its own; this is only what gets the game past the movies.
+ */
+void imp_SmackOpen(void) {
+    static uint32_t smk;
+    if (!smk) {
+        smk = shims_alloc(1024);            /* far more than the fields used */
+        memset((void*)ADDR(smk), 0, 1024);
+        MEM32(smk +  0) = 0x324B4D53u;      /* "SMK2" */
+        MEM32(smk +  4) = 320;              /* Width      */
+        MEM32(smk +  8) = 200;              /* Height     */
+        MEM32(smk + 12) = 1;                /* Frames     */
+        MEM32(smk + 16) = 33;               /* MSPerFrame */
+    }
+    { static int said; if (!said) { said = 1;
+        fprintf(stderr, "[smack] SmackOpen -> an empty 320x200 movie\n"); } }
+    RET(smk);
+    STDRET(3);
+}
 
 /* ============================================================
  * The registry, forwarded to the host's. MechCommander keeps its settings in
