@@ -330,15 +330,23 @@ static DWORD WINAPI watchdog(LPVOID unused) {
          * 0x808790, `play` aSystem's "a movie is running" flag.
          */
         uint32_t mission = MEM32(0x008087A8u), sys = MEM32(0x007AAE80u);
+        /* BriefingScreen::setUpDeploy walks the roster list whose head lives at
+         * [[Logistics + 0x1CC]]. A null head is an empty Ready Area, which is
+         * an empty force group, which is a launch button that stays grey. */
+        uint32_t logi = MEM32(0x00808634u);
+        uint32_t list = logi ? MEM32(logi + 0x1CCu) : 0;
+        uint32_t head = list ? MEM32(list) : 0;
+        uint32_t list2 = logi ? MEM32(logi + 0x1D0u) : 0;
+        uint32_t head2 = list2 ? MEM32(list2) : 0;
         fprintf(stderr, "[watchdog] func=0x%08X pc=0x%08X depth=%u "
                 "peek=%u dispatch=%u wndproc=%u | state=%d movie=%d mode=%d "
-                "play=%d%s\n",
+                "play=%d roster=%08X/%08X %08X/%08X%s\n",
                 g_cur_func, pc, g_callstack_n,
                 g_n_peek, g_n_dispatch, g_n_wndproc,
                 mission ? (int)MEM32(mission) : -1,
                 mission ? (int)MEM32(mission + 0x14) : -1,
                 (int)MEM32(0x00808790u),
-                sys ? (int)MEM32(sys + 0xAECu) : -1,
+                sys ? (int)MEM32(sys + 0xAECu) : -1, list, head, list2, head2,
                 same ? "  (PC unchanged)" : "");
         if (same) {
             uint32_t n = g_callstack_n < CALLSTACK_MAX
