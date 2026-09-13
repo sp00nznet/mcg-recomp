@@ -18,6 +18,7 @@ Outputs (paths relative to the repo root):
 Usage:  py -3.11 tools/cv_extract.py [MCX.EXE] [repo_root]
         py -3.11 tools/cv_extract.py --selftest
 """
+import bisect
 import ctypes
 import json
 import os
@@ -289,12 +290,29 @@ def build(exe_path, root):
         if text_lo <= s['va'] < text_hi:
             by_va.setdefault(s['va'], []).append(s['name'])
 
+    # The linker lays each object module out contiguously, so a module's .text
+    # extent attributes every function inside it to an original source file.
+    spans = []
+    for m in modules:
+        for s in m['segments']:
+            if s['seg'] == 1 and s['size']:
+                lo = pe.image_base + text['vaddr'] + s['offset']
+                spans.append((lo, lo + s['size'], m['obj'], m['source']))
+    spans.sort()
+
+    def module_of(va):
+        i = bisect.bisect_right(spans, (va, float('inf'), '', '')) - 1
+        if i >= 0 and spans[i][0] <= va < spans[i][1]:
+            return spans[i][2], spans[i][3]
+        return None, None
+
     code = sorted(by_va)
     functions = []
     for i, va in enumerate(code):
         names = sorted(by_va[va], key=lambda n: (not n.startswith('?'), len(n)))
         nxt = code[i + 1] if i + 1 < len(code) else text_hi
         size = min(exact.get(va, nxt - va), nxt - va)
+        obj, src = module_of(va)
         functions.append({
             'address': f'0x{va:08X}',
             'address_int': va,
@@ -303,6 +321,8 @@ def build(exe_path, root):
             'demangled': demangle(names[0]),
             'exact_size': va in exact,
             'aliases': names[1:],
+            'module': obj,
+            'source': src,
         })
 
     os.makedirs(os.path.join(root, 'config'), exist_ok=True)

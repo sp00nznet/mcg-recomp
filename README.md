@@ -33,9 +33,9 @@ discovery heuristic in this repo because none is needed.
 | Phase | Status | Description |
 |-------|--------|-------------|
 | **Phase 0** | **Complete** | Binary triage, CodeView symbol recovery — **5,760 named functions, 98.7% of `.text`** |
-| Phase 1 | Next | x86 → C code generation via the shared `pcrecomp` lifter |
-| Phase 2 | Pending | Compilation — MSVC x86 static lib |
-| Phase 3 | Pending | Executable link: register/memory model, CRT init, import bridges |
+| **Phase 1** | **Complete** | x86 → C code generation — **all 5,760 functions, 0 lift errors**, 829K lines |
+| **Phase 2** | **Complete** | Compilation — **13 objects, 0 errors, 0 warnings** (MSVC, `/W1`) |
+| Phase 3 | Next | Executable link: register/memory model, CRT init, import bridges |
 | Phase 4 | Pending | Win32 + DirectX 6 HAL (DDraw / DSound / DPlay / DInput) |
 | Phase 5 | Pending | Engine abstraction — VFX rasteriser, terrain, sprite |
 | Phase 6 | Pending | Asset loading (FST / PAK / SHP / FIT) |
@@ -114,6 +114,59 @@ single instruction is lifted:
 | `linkup/` | 7 | DirectPlay multiplayer (`SessionManager`, `DPPlayer`) |
 | `terrain/` | 4 | `Terrain`, `terrmap`, `TerrTxm`, `Vertex` |
 | `iface/`, `mission/`, `ai/`, `camera/`, `appear/`, `Game OS/Sound Renderer/` | 2–4 each | |
+
+## Phase 1: x86 → C code generation
+
+`run_pipeline.py` drives the shared `pcrecomp` lifter over the CodeView table.
+Because the bounds come from the binary's own debug data rather than a heuristic,
+every entry lifts:
+
+| Result | Value |
+|--------|-------|
+| Functions lifted | **5,760 / 5,760** |
+| Lift errors | **0** |
+| Output | 829,128 lines of C, 41.1 MB, 12 files |
+| Time | ~9 s |
+
+```
+py -3.11 run_pipeline.py            # -> src/recomp/gen/
+```
+
+Generated functions keep the original names, so the output is greppable —
+`Terrain__getTerrainWindow_0073B320`, not `sub_0073B320` — and each carries its
+address, its object module and its demangled C++ signature as a comment.
+
+Two things the symbols made visible that a heuristic run would have hidden:
+
+- **104 functions are a single byte.** They are empty virtual overrides that the
+  compiler reduced to a bare `ret`, and they sit in vtables, so dispatch needs
+  them. The inherited driver skipped anything under two bytes — a sane guard when
+  bounds come from IDA, wrong when they come from the linker.
+- **`ebp` and the x87 stack are global in the runtime, not per-function.** An
+  optimising compiler splits one frame across blocks that all address it through
+  the same `ebp`; declaring it locally gives each block a frame pointer of zero.
+  The lifter publishes the correct scratch list as `lift32.FUNCTION_LOCALS`, and
+  that is what this driver emits.
+
+## Phase 2: compilation
+
+```
+cl /nologo /c /W1 /MP /I . recomp_*.c      # 13 objects, 39.8 MB
+```
+
+**0 errors, 0 warnings.** Getting to zero warnings turned up a real semantics bug
+in the shared lifter rather than anything specific to this game: x86 masks a
+shift count to its low five bits before doing anything, so `shl dword [ecx],0x6e`
+shifts by **14**, and `shl dword [edx],0xa0` shifts by **zero** and touches no
+flags at all. The lifter emitted the raw immediate, which in C is a shift wider
+than the type — undefined behaviour, and the compiler is free to hold the
+operand, zero it, or use the low bits. This binary has 172 such sites.
+
+Fixed in `pcrecomp`'s `lift32.py` (`shl/sal`, `shr`, `sar`, `shld`, `shrd` — the
+rotate emitter already masked correctly), with four new cases in the toolbox's
+differential harness, which runs the lifted C against Unicorn and compares every
+register and flag: **74/78 match hardware, 0 failures**, the 4 remaining being
+pre-existing documented divergences.
 
 ## Layout
 
