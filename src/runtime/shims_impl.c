@@ -1297,7 +1297,6 @@ void imp_SetWindowTextA(void){ RET(SetWindowTextA(HWND_OF(ARG(0)), (LPCSTR)simp(
 void imp_PostQuitMessage(void) { PostQuitMessage((int)ARG(0)); STDRET(1); }
 void imp_MessageBeep(void)   { RET(MessageBeep(ARG(0)) ? 1 : 0); STDRET(1); }
 void imp_ShowCursor(void)    { RET((uint32_t)ShowCursor((BOOL)ARG(0))); STDRET(1); }
-void imp_SetCursorPos(void)  { RET(SetCursorPos((int)ARG(0), (int)ARG(1)) ? 1 : 0); STDRET(2); }
 void imp_SetCapture(void)    { RET(h_put(SetCapture(HWND_OF(ARG(0))))); STDRET(1); }
 void imp_ReleaseCapture(void){ RET(ReleaseCapture() ? 1 : 0); STDRET(0); }
 void imp_GetSystemMetrics(void) { RET((uint32_t)GetSystemMetrics((int)ARG(0))); STDRET(1); }
@@ -1316,8 +1315,22 @@ void imp_PtInRect(void)      { POINT p = { (LONG)ARG(1), (LONG)ARG(2) }; RET(PtI
 void imp_IntersectRect(void) { RET(IntersectRect((LPRECT)simp(ARG(0)), (const RECT*)simp(ARG(1)), (const RECT*)simp(ARG(2))) ? 1 : 0); STDRET(3); }
 void imp_AdjustWindowRect(void) { RET(AdjustWindowRect((LPRECT)simp(ARG(0)), ARG(1), (BOOL)ARG(2)) ? 1 : 0); STDRET(3); }
 void imp_ClientToScreen(void){ RET(ClientToScreen(HWND_OF(ARG(0)), (LPPOINT)simp(ARG(1))) ? 1 : 0); STDRET(2); }
-void imp_GetCursorPos(void)  { RET(GetCursorPos((LPPOINT)simp(ARG(0))) ? 1 : 0); STDRET(1); }
-void imp_ClipCursor(void)    { RET(ClipCursor((const RECT*)simp(ARG(0))) ? 1 : 0); STDRET(1); }
+void imp_GetCursorPos(void) {
+    POINT p = { 0, 0 };
+    BOOL ok = GetCursorPos(&p);
+    ddraw_map_cursor(&p);                 /* desktop -> the engine's screen */
+    { LPPOINT out = (LPPOINT)simp(ARG(0)); if (out) *out = p; }
+    RET(ok ? 1 : 0);
+    STDRET(1);
+}
+
+/* Both of these speak the engine's fullscreen coordinates, which are not the
+ * desktop's. Confining or warping the host pointer with them would move it
+ * somewhere the player did not ask for, and neither is load-bearing: the game
+ * uses them to keep the cursor inside a screen that, windowed, it does not
+ * own. */
+void imp_ClipCursor(void)    { RET(1); STDRET(1); }
+void imp_SetCursorPos(void)  { RET(1); STDRET(2); }
 void imp_MapWindowPoints(void) { RET((uint32_t)MapWindowPoints(HWND_OF(ARG(0)), HWND_OF(ARG(1)), (LPPOINT)simp(ARG(2)), ARG(3))); STDRET(4); }
 void imp_InvalidateRect(void) { RET(InvalidateRect(HWND_OF(ARG(0)), (const RECT*)simp(ARG(1)), (BOOL)ARG(2)) ? 1 : 0); STDRET(3); }
 

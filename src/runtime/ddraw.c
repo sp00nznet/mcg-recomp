@@ -511,6 +511,12 @@ static void dd2_SetDisplayMode(void) {
     g_mode_bpp = ARG(3);
     fprintf(stderr, "[ddraw] SetDisplayMode2 %ux%u %ubpp\n",
             g_mode_w, g_mode_h, g_mode_bpp);
+    /* Setting the mode once is startup; setting it again is a loop. Name the
+     * caller the second time, so the repeat arrives with a return address. */
+    {
+        static int n;
+        if (++n == 2) recomp_dump_callstack();
+    }
     if (g_hwnd) {
         /* The window keeps whatever size it was created at -- resizing it to
          * the mode would put the desktop-covering geometry straight back.
@@ -554,6 +560,32 @@ static void dd_FlipToGDISurface(void) { RET(DD_OK); STDRET(1); }
 static void dd_RestoreDisplayMode(void) { RET(DD_OK); STDRET(1); }
 static void dd_WaitForVerticalBlank(void) { RET(DD_OK); STDRET(3); }
 static void dd_CreateClipper(void) { if (ARG(2)) MEM32(ARG(2)) = 0; RET(DDERR_UNSUPPORTED); STDRET(4); }
+
+/*
+ * Desktop point -> the screen the engine thinks it has.
+ *
+ * The engine believes it owns a fullscreen g_mode_w x g_mode_h display and
+ * reads the pointer straight out of GetCursorPos in those coordinates. We give
+ * it a window instead, clamped to the work area, so a raw desktop point lands
+ * well outside a screen that as far as the engine knows has no edges. DrawMouse
+ * clips the save-under rectangle with `width = clipRight - x + 1`, which then
+ * goes negative -- and `shr ecx, 2` turns -46 into 0x3FFFFFF4, so the rep movsd
+ * that saves the pixels under the cursor walks straight out of the arena.
+ */
+void ddraw_map_cursor(POINT* p) {
+    RECT rc;
+    if (!g_hwnd || !g_mode_w || !g_mode_h) return;
+    ScreenToClient(g_hwnd, p);
+    GetClientRect(g_hwnd, &rc);
+    if (rc.right > 0 && rc.bottom > 0) {     /* present() scales; so must this */
+        p->x = p->x * (LONG)g_mode_w / rc.right;
+        p->y = p->y * (LONG)g_mode_h / rc.bottom;
+    }
+    if (p->x < 0) p->x = 0;
+    if (p->y < 0) p->y = 0;
+    if (p->x >= (LONG)g_mode_w) p->x = (LONG)g_mode_w - 1;
+    if (p->y >= (LONG)g_mode_h) p->y = (LONG)g_mode_h - 1;
+}
 
 static void dd_SetCooperativeLevel(void) {
     g_hwnd = (HWND)shims_handle(ARG(1));

@@ -189,6 +189,10 @@ static void dump_callstack(void) {
         fprintf(stderr, "    called from 0x%08X\n", g_callstack[i]);
 }
 
+/* Same walk, callable from a shim: "who asked for this?" is the whole question
+ * when the engine repeats an expensive setup step and nothing says why. */
+void recomp_dump_callstack(void) { dump_callstack(); }
+
 static void dump_callsites(void) {
     fprintf(stderr, "  recent indirect call sites (oldest first):\n");
     for (uint32_t i = 0; i < CALLSITE_RING; i++) {
@@ -545,6 +549,42 @@ static void mcg_fassign(void) {
 }
 
 /*
+ * void __cdecl _cfltcvt(double* value, char* buf, int format, int prec, int caps)
+ *
+ * printf's float formatter -- __output calls it through [0x7A7150] for every
+ * %e/%f/%g, then only touches the result with _forcdecpt and _cropzeros, so
+ * what it writes is the final numeric text and the host's printf produces the
+ * same thing. Overridden for the same reason __fassign is: it is the head of
+ * MSVC6's hand-written 80-bit conversion chain (_cftoe/_cftof/_cftog ->
+ * _fptostr), the part of the CRT that leans hardest on x87 precision control
+ * and the 12-byte long double, and the lifted version comes back with the
+ * caller's ebp gone -- __output then read its own locals through a null frame
+ * pointer and faulted on the first menu that formats a number.
+ */
+static void mcg_cfltcvt(void) {
+    uint32_t vp  = MEM32(g_esp + 4);
+    uint32_t dst = MEM32(g_esp + 8);
+    int fmt  = (int)MEM32(g_esp + 12);
+    int prec = (int)MEM32(g_esp + 16);
+    int caps = (int)MEM32(g_esp + 20);
+    double v = 0.0;
+    char spec[16], out[584];           /* __output's own buffer is 0x248 */
+    char conv;
+
+    if (vp) memcpy(&v, (const void*)ADDR(vp), sizeof v);
+    /* The format char picks the conversion; caps picks its case. */
+    if (fmt == 'e' || fmt == 'E')      conv = caps ? 'E' : 'e';
+    else if (fmt == 'f' || fmt == 'F') conv = 'f';
+    else                               conv = caps ? 'G' : 'g';
+    if (prec < 0) prec = 0;
+    if (prec > 512) prec = 512;
+    snprintf(spec, sizeof spec, "%%.%d%c", prec, conv);
+    snprintf(out, sizeof out, spec, v);
+    if (dst) memcpy((void*)ADDR(dst), out, strlen(out) + 1);
+    g_esp += 4;                        /* __cdecl: the caller cleans up */
+}
+
+/*
  * void __cdecl Assert(int condition, unsigned line, char* file, char* msg)
  *
  * The engine's own assertion. Overridden for two reasons: it reports what the
@@ -584,6 +624,7 @@ recomp_func_t recomp_lookup_manual(uint32_t va) {
     case 0x00644250u: return mcg_Assert;       /* Assert    */
     case 0x00760D27u: return mcg_initterm;     /* _initterm */
     case 0x00763EDAu: return mcg_fassign;      /* __fassign  */
+    case 0x007641DFu: return mcg_cfltcvt;      /* __cfltcvt  */
     case 0x006440B0u: return mcg_GeneralMsg;   /* GeneralMsg(char*) */
     case 0x006440D0u: return mcg_FatalMsg;     /* FatalMsg(char*)   */
     case 0x00644180u: return mcg_Fatal;        /* Fatal(uint,char*,char*) */
@@ -757,6 +798,47 @@ static int crt_selftest(void) {
             g_ecx = 0;
             snprintf(label, sizeof label, "textToLong(\"%s\")", cases[i].in);
             expect(label, call_lifted(TEXTTOLONG, 1, &arg), cases[i].want);
+        }
+    }
+
+    /* printf's float path, end to end: __output -> _cfltcvt -> _forcdecpt /
+     * _cropzeros. Every logistics screen formats numbers through it, and it
+     * faulted on the first one until _cfltcvt was overridden. Comparing against
+     * the host's sprintf checks the override AND the lifted code around it. */
+    {
+        const uint32_t SPRINTF = 0x0075F973, CFLTCVT_INIT = 0x0075F92B;
+        /* The float conversion table starts out pointing at _fptrap, so
+         * anything with a %f in it exits with R6002 until _cfltcvt_init has
+         * filled it. WinMain gets there through _fpmath; --selftest does not. */
+        call_lifted(CFLTCVT_INIT, 0, NULL);
+        static const struct { const char* fmt; double v; } cases[] = {
+            { "%f",    3.5 },   { "%.2f", 1234.5678 }, { "%f", 0.0 },
+            { "%.3e", -42.0 },  { "%g",   0.000125 },  { "%.1f", -0.05 },
+        };
+        for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++) {
+            uint32_t dst = shims_alloc(128), args[4];
+            double v = cases[i].v;
+            uint32_t bits[2];
+            char want[128], label[64];
+            memcpy(bits, &v, sizeof bits);
+            args[0] = dst;
+            args[1] = shims_put_str(cases[i].fmt);
+            args[2] = bits[0];
+            args[3] = bits[1];
+            call_lifted(SPRINTF, 4, args);
+            snprintf(want, sizeof want, cases[i].fmt, v);
+            snprintf(label, sizeof label, "sprintf(\"%s\", %g)",
+                     cases[i].fmt, v);
+            {
+                const char* got = (const char*)ADDR(dst);
+                if (strcmp(got, want)) {
+                    fprintf(stderr, "  [FAIL] %-34s got \"%s\"  want \"%s\"\n",
+                            label, got, want);
+                    g_st_fail++;
+                } else {
+                    fprintf(stderr, "  [ ok ] %-34s \"%s\"\n", label, got);
+                }
+            }
         }
     }
 

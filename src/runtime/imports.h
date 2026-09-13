@@ -94,10 +94,17 @@ uint32_t      dplay_lobby_create(void);
 uint32_t      dplay_create(void);
 recomp_func_t ddraw_lookup(uint32_t va);   /* resolves every COM method VA */
 
+/* Desktop point -> the fullscreen screen the engine thinks it is drawing to.
+ * Spelled as the tag so this header stays usable without windows.h. */
+void ddraw_map_cursor(struct tagPOINT* p);
+
 /* Region bounds, so VirtualQuery can answer without duplicating the layout. */
 uint32_t recomp_image_base(void);
 uint32_t recomp_image_end(void);
 uint32_t recomp_stack_base(void);
 uint32_t recomp_stack_end(void);
+
+/* Innermost ~24 lifted call sites, for a shim that wants to say who called it. */
+void recomp_dump_callstack(void);
 
 #endif /* MCG_IMPORTS_H */
