@@ -90,6 +90,17 @@ static RGBQUAD g_pal[256];
 static HWND g_hwnd;
 static uint32_t g_mode_w = 640, g_mode_h = 480, g_mode_bpp = 8;
 
+/* The engine's logistics screens are a fixed layout of this size, whatever
+ * display mode is set -- the widget coordinates in the .fit files and the
+ * background art both use it. */
+#define UI_LAYOUT_W 640u
+#define UI_LAYOUT_H 480u
+
+/* The part of the surface the window is currently showing. present() decides
+ * it; ddraw_map_cursor has to map pointer positions through the same rectangle
+ * or clicks land somewhere other than where they look. */
+static uint32_t g_shown_w = 640, g_shown_h = 480;
+
 /* One 32-bit DIB, reused: the palette lookup target the host can blit. */
 static HDC g_memdc;
 static HBITMAP g_dib;
@@ -328,16 +339,66 @@ static void present(surface_t* s) {
                   MEM32(0x007BBB74u) + 1, MEM32(0x007BBB78u) + 1);
       } }
 
+    /*
+     * How much of the surface is actually laid out?
+     *
+     * The engine only ever sets 1280x1024 -- 8bpp for the logistics shell,
+     * 16bpp for the mission -- but its logistics screens are a fixed 640x480
+     * layout, and the art backing them really is 640x480 (lsrbk00.tga loads at
+     * exactly that). So the shell paints the top-left quarter of a screen four
+     * times its size and the rest stays black, which is what the window showed.
+     *
+     * The mission is different: it renders the battlefield across the whole
+     * mode. The engine's own choice of colour depth is the honest way to tell
+     * the two apart, because it is the same choice that decides the layout.
+     *
+     * ponytail: presentation only -- nothing about the engine's own geometry
+     * changes, so input mapping (ddraw_map_cursor) keeps working off the same
+     * source rectangle. MCG_NOSCALE=1 shows the raw mode instead.
+     */
+    uint32_t sw = s->width, sh = s->height;
+    if (s->width > UI_LAYOUT_W && s->height > UI_LAYOUT_H) {
+        static int raw = -1;
+        if (raw < 0) { const char* e = getenv("MCG_NOSCALE"); raw = e && *e != '0'; }
+        if (!raw) {
+            /* Sparse probe of the area OUTSIDE the layout box. Colour depth is
+             * not a reliable tell -- the mission composites its 8-bit HUD over
+             * the same surface -- so ask the pixels instead. ~200 reads a frame
+             * against 1.3M, which is nothing next to the conversion above.
+             *
+             * Hysteresis in one direction only: a single painted pixel out
+             * there switches straight to the full mode, but it takes a run of
+             * empty frames to go back, so a fade to black mid-mission does not
+             * jump the view. */
+            static int empty_run;
+            int outside = 0;
+            for (uint32_t y = 0; y < s->height && !outside; y += 64)
+                for (uint32_t x = 0; x < s->width; x += 64) {
+                    if (x < UI_LAYOUT_W && y < UI_LAYOUT_H) continue;
+                    if (g_dib_px[(size_t)y * s->width + x] & 0xFFFFFFu) {
+                        outside = 1;
+                        break;
+                    }
+                }
+            empty_run = outside ? 0 : empty_run + 1;
+            if (empty_run > 30) { sw = UI_LAYOUT_W; sh = UI_LAYOUT_H; }
+            else if (!outside && g_shown_w == UI_LAYOUT_W) { sw = UI_LAYOUT_W;
+                                                             sh = UI_LAYOUT_H; }
+        }
+    }
+    g_shown_w = sw;
+    g_shown_h = sh;
+
     HDC wdc = GetDC(g_hwnd);
     HGDIOBJ old = SelectObject(g_memdc, g_dib);
     RECT rc;
     GetClientRect(g_hwnd, &rc);
-    if ((uint32_t)rc.right == s->width && (uint32_t)rc.bottom == s->height) {
-        BitBlt(wdc, 0, 0, (int)s->width, (int)s->height, g_memdc, 0, 0, SRCCOPY);
+    if ((uint32_t)rc.right == sw && (uint32_t)rc.bottom == sh) {
+        BitBlt(wdc, 0, 0, (int)sw, (int)sh, g_memdc, 0, 0, SRCCOPY);
     } else {
         SetStretchBltMode(wdc, COLORONCOLOR);
         StretchBlt(wdc, 0, 0, rc.right, rc.bottom, g_memdc, 0, 0,
-                   (int)s->width, (int)s->height, SRCCOPY);
+                   (int)sw, (int)sh, SRCCOPY);
     }
     SelectObject(g_memdc, old);
     ReleaseDC(g_hwnd, wdc);
@@ -727,14 +788,17 @@ void ddraw_map_cursor(POINT* p) {
     if (!g_hwnd || !g_mode_w || !g_mode_h) return;
     ScreenToClient(g_hwnd, p);
     GetClientRect(g_hwnd, &rc);
-    if (rc.right > 0 && rc.bottom > 0) {     /* present() scales; so must this */
-        p->x = p->x * (LONG)g_mode_w / rc.right;
-        p->y = p->y * (LONG)g_mode_h / rc.bottom;
+    /* Map through the SAME rectangle present() is showing, not the whole mode:
+     * while the shell is scaled up, a pointer halfway across the window is
+     * halfway across the 640x480 layout, not halfway across 1280x1024. */
+    if (rc.right > 0 && rc.bottom > 0) {
+        p->x = p->x * (LONG)g_shown_w / rc.right;
+        p->y = p->y * (LONG)g_shown_h / rc.bottom;
     }
     if (p->x < 0) p->x = 0;
     if (p->y < 0) p->y = 0;
-    if (p->x >= (LONG)g_mode_w) p->x = (LONG)g_mode_w - 1;
-    if (p->y >= (LONG)g_mode_h) p->y = (LONG)g_mode_h - 1;
+    if (p->x >= (LONG)g_shown_w) p->x = (LONG)g_shown_w - 1;
+    if (p->y >= (LONG)g_shown_h) p->y = (LONG)g_shown_h - 1;
 }
 
 static void dd_SetCooperativeLevel(void) {

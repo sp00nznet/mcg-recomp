@@ -249,57 +249,45 @@ run. Add a case whenever a primitive is suspected: it is cheap, and it converts
   run_pipeline.py is for.
 
 ### Current bring-up stop
-**The mission runs.** The sequence that gets there:
+**A mission runs and the battlefield draws.** The sequence:
 
     MCG_CLICK="477,165@8;477,165@18;477,165@28;37,376>248,61@45;
                37,376>304,61@55;37,376>246,172@65;570,339@78;570,339@90"
 
-New Campaign (three times, see the timing note), three drags from the first
-Ready Area entry into Force Group 1 slots 1 and 2 and Force Group 2, then the
-launch button at UI (570,339). Watch `gate` climb 0 -> 25 -> 50 -> 75 as each
-'Mech is assigned; once requiredAssigned() is satisfied the logistics layer
-tears down and the arena more than doubles, 8.4 MB -> 17.5 MB, as mission
-assets load.
+New Campaign, three drags from the Ready Area into force groups, then the
+launch button at UI (570,339). `gate` climbs 0 -> 25 -> 50 -> 75; Mission::run
+reaches state 7 and the frame loop turns at ~25,000 peeks.
 
-Scenario::init then populates the ObjectMap successfully -- `[objmap]` reports
-cells 37, 38, 39, 53, 54, 63, 64, 66 with valid bucket pointers, so the
-world-to-map-cell float maths is fine -- and control reaches the in-mission
-frame loop:
+**The black terrain was the DirectDraw mock refusing 16bpp.** SetDisplayMode
+answered `g_mode_bpp == 8 ? DD_OK : DDERR_UNSUPPORTED`, and the mission asks for
+1280x1024 **16bpp** -- so the engine reported "Unable to Set Display Mode" and
+never built a surface for the terrain renderer, while the 8-bit HUD kept drawing
+normally. Surfaces now carry their own bpp (pitch is bytes and doubles for 16),
+fill_desc reports a 565 pixel format with real masks, and present() unpacks 565
+into the 32-bit DIB. This was never an asset-format problem: the clean-room
+sibling never decoded terrain either (its terrain.cpp is a 228-line tileset
+skeleton), and running the engine's own renderer sidesteps that entirely.
 
-    RunMission -> Mission::run+0x299 -> ... -> UpdateDisplay+0x1A0
-      -> TacticalMap::display+0x8A4
-        -> TacticalMap::drawObjects+0xAD9
-          -> AG_ellipse_fill        bad read of 3, ecx=FFFFFFFF edx=2
-
-So the battlefield view is being drawn and the fault is in `AG_ellipse_fill`
-(0x006B6970) -- the filled ellipse under each unit. `ecx=FFFFFFFF` is a count
-that has gone negative, which is the same shape as the VFX blitter bugs: a
-hand-written asm primitive whose loop bound the lifter got wrong. Give it a
-`--selftest` case the way VFX_pane_wipe/VFX_pane_copy/DrawTransparent have
-one -- that is how each of those was settled.
-
-Also seen in the same run and not yet chased:
-`[game:Fatal] code=0x80004001 " Unable to Set Display Mode "` --
-DDERR_UNSUPPORTED out of the mock's SetDisplayMode during the mission's own
-display reset.
+**Two different layouts share one mode.** The engine only ever sets 1280x1024 --
+8bpp for the shell, 16bpp for the mission -- but the logistics screens are a
+fixed 640x480 layout (their art is 640x480: lsrbk00.tga loads at exactly that),
+so the shell paints the top-left quarter and the rest stays black. present()
+therefore picks its source rectangle by PROBING: a sparse grid outside the
+640x480 box, ~200 reads a frame. Anything painted out there means the full mode;
+a run of 30 empty frames shrinks back to the layout box, so a mid-mission fade
+does not jump the view. Colour depth looked like the obvious tell and is NOT
+one -- the mission composites its 8-bit HUD over the same surface, and keying on
+it zoomed the battlefield 2x. `MCG_NOSCALE=1` shows the raw mode.
+`ddraw_map_cursor` maps through the same rectangle or clicks land off-target.
 
 **Two timing traps, both of which silently wasted whole runs:**
-- `MCG_WATCH` does a **VirtualQuery syscall at every call boundary**. Fine for a
-  short diagnostic; it makes the game about a hundred times too slow to drive
-  (the pump drops from ~27,000 peeks to ~90), so every scripted click lands
-  mid-load and looks like a miss. **Never leave it armed while scripting.**
-- Hooking a hot function through `OVERRIDES` does the same for the same reason.
-  `aPort::copyTo` runs for every blit in the game. Instrumentation on a hot path
-  invalidates the measurement it exists to take.
+- `MCG_WATCH` does a VirtualQuery syscall at every call boundary -- about a
+  hundred times too slow to drive the UI. Never leave it armed while scripting.
+- Hooking a hot function through `OVERRIDES` does the same; `aPort::copyTo` runs
+  for every blit in the game.
 
-`MCG_CLICK` times run from `Mission::run` reaching state 3 -- the engine's own
-"logistics shell is up" signal -- because the intro movies make startup vary by
-tens of seconds. State 3 lands slightly before the menu is interactive, so the
-New Campaign click is fired three times for safety.
-
-Known and NOT in the way: each Ready Area cell draws only ~160 of 2392 pixels.
-The entries are live lObjects with working hit-testing whether or not they draw,
-which is exactly why the drags land.
+`MCG_CLICK` times run from Mission::run reaching state 3, not from process
+start, because the intro movies make startup vary by tens of seconds.
 
 ### Bring-up diagnostics available (trace builds)
 - `--selftest` -- lifted CRT string primitives, `FitIniFile::textToLong` (the

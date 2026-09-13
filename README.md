@@ -37,7 +37,7 @@ discovery heuristic in this repo because none is needed.
 | **Phase 2** | **Complete** | Compilation — **13 objects, 0 errors, 0 warnings** (MSVC, `/W1`) |
 | **Phase 3** | **Complete** | Links and runs — **CRT startup completes, game code executes**, 204 import bridges |
 | **Phase 4** | **In progress** | Win32 + DirectX 6 HAL — **renders and navigates: title, menus, campaign loads** |
-| **Phase 5** | **In progress** | Engine abstraction — **a mission runs: HUD, radar and deployed 'Mechs are live** |
+| **Phase 5** | **In progress** | Engine abstraction — **the battlefield renders: terrain, units, HUD** |
 | Phase 6 | Pending | Asset loading (FST / PAK / SHP / FIT) |
 | Phase 7+ | Pending | ABL script VM, logistics, mission layer, modern backend |
 
@@ -407,10 +407,9 @@ positive, zero and negative, plus the whole `seekPacket` tail end to end.
 
 Open, and honestly open rather than fixed:
 
-- **The terrain does not draw.** A mission now runs — the in-game HUD is up,
-  the radar tracks unit blips, the Command Palette is drawn and the mech bar
-  shows the deployed 'Mechs by name — but the battlefield itself renders black.
-  That is the terrain/sprite layer, which nothing has exercised yet.
+- **Menu buttons still render as thin bars.** Cosmetic, and known not to block
+  anything — the widgets are live objects with working hit-testing whether or
+  not they draw.
 - **Each Ready Area entry draws only ~160 of its 2392 pixels** -- nine distinct
   palette indices, 2233 of them the wipe colour. This is NOT what blocks
   deployment: the entries are live objects with working hit-testing whether or
