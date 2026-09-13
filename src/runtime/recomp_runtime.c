@@ -1304,6 +1304,65 @@ static int crt_selftest(void) {
         }
     }
 
+    /*
+     * AG_ellipse_fill(pane, cx, cy, rx, ry, colour) -- the filled ellipse drawn
+     * under a selected unit, and the reason selecting a 'Mech used to crash.
+     *
+     * It is the routine that picks one of two span writers by storing a code
+     * address in a global and calling through it, so it only became reachable
+     * at all once immediates were added as a discovery source. Reachable is not
+     * the same as right: the guard bytes either side of the buffer are the
+     * point of this case, because a span whose length went wrong writes past
+     * the end of the surface rather than drawing a bad shape.
+     */
+    {
+        const uint32_t ELLIPSE = 0x006B6970;
+        const int W = 64, H = 48, GUARD = 64;
+        uint32_t blk = shims_alloc(GUARD + W * H + GUARD);
+        uint32_t buf = blk + GUARD;
+        uint32_t win = shims_alloc(12), pane = shims_alloc(20), a[6];
+        uint8_t* all = (uint8_t*)ADDR(blk);
+        const uint8_t* px = (const uint8_t*)ADDR(buf);
+        int painted = 0, wrong = 0, spilled = 0;
+
+        memset(all, 0x5A, GUARD + W * H + GUARD);
+        memset((void*)ADDR(buf), 0x55, W * H);
+        MEM32(win) = buf; MEM32(win + 4) = W - 1; MEM32(win + 8) = H - 1;
+        MEM32(pane) = win; MEM32(pane + 4) = 0; MEM32(pane + 8) = 0;
+        MEM32(pane + 12) = W - 1; MEM32(pane + 16) = H - 1;
+
+        a[0] = pane; a[1] = 32; a[2] = 24; a[3] = 20; a[4] = 12; a[5] = 0xAB;
+        call_lifted(ELLIPSE, 6, a);
+
+        for (int i = 0; i < GUARD; i++) {
+            if (all[i] != 0x5A) spilled++;                       /* before */
+            if (all[GUARD + W * H + i] != 0x5A) spilled++;       /* after  */
+        }
+        for (int i = 0; i < W * H; i++) {
+            if (px[i] == 0x55) continue;
+            painted++;
+            if (px[i] != 0xAB) wrong++;
+        }
+        expect("AG_ellipse_fill stays in its buffer", (uint32_t)spilled, 0);
+        expect("AG_ellipse_fill writes only its colour", (uint32_t)wrong, 0);
+        /* A 20x12 ellipse is pi*rx*ry ~= 754 pixels. Generous bounds: the point
+         * is to catch "drew nothing" and "filled the whole surface", not to
+         * pin down the rasteriser's edge rule. */
+        expect("AG_ellipse_fill fills a plausible area",
+               (uint32_t)(painted > 400 && painted < 1100), 1);
+        if (spilled || wrong || painted <= 400 || painted >= 1100) {
+            fprintf(stderr, "         painted %d px, %d not the fill colour, "
+                    "%d bytes outside the buffer\n", painted, wrong, spilled);
+            for (int y = 8; y < 40; y += 2) {
+                fprintf(stderr, "         ");
+                for (int x = 4; x < 60; x++)
+                    fputc(px[y * W + x] == 0xAB ? '#'
+                          : (px[y * W + x] == 0x55 ? '.' : '?'), stderr);
+                fputc('\n', stderr);
+            }
+        }
+    }
+
     fprintf(stderr, "=== %s (%d failure%s) ===\n",
             g_st_fail ? "FAILURES" : "all passed", g_st_fail,
             g_st_fail == 1 ? "" : "s");
