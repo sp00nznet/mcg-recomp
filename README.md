@@ -37,7 +37,7 @@ discovery heuristic in this repo because none is needed.
 | **Phase 2** | **Complete** | Compilation — **13 objects, 0 errors, 0 warnings** (MSVC, `/W1`) |
 | **Phase 3** | **Complete** | Links and runs — **CRT startup completes, game code executes**, 204 import bridges |
 | **Phase 4** | **In progress** | Win32 + DirectX 6 HAL — **renders and navigates: title, menus, campaign loads** |
-| **Phase 5** | **Started** | Engine abstraction — **the Briefing/Deployment screen renders in full** |
+| **Phase 5** | **In progress** | Engine abstraction — **a mission launches; loading faults in `Scenario::init`** |
 | Phase 6 | Pending | Asset loading (FST / PAK / SHP / FIT) |
 | Phase 7+ | Pending | ABL script VM, logistics, mission layer, modern backend |
 
@@ -407,15 +407,20 @@ positive, zero and negative, plus the whole `seekPacket` tail end to end.
 
 Open, and honestly open rather than fixed:
 
-- **The launch button refuses, it is not missing.** Its rect is
-  `(517,330)-(624,348)` in the engine's own UI coordinates, read out of
-  `BriefingScreen::handleEvent`, and clicking the centre reaches the handler.
-  The gate is a chain: the button must be enabled, `[0x8080A8]` non-zero and
-  either above `[0x8080AC]` or `Logistics::requiredAssigned()` true, else
-  `[Logistics+0x18BC]` non-zero. Past it the engine calls
-  `Mission::StartScenario` with the current scenario name. So a mission starts
-  once the force satisfies `requiredAssigned` -- which is about WHICH units are
-  deployed, not how many. Deploying works (see above); one 'Mech is not enough.
+- **A mission launches, then faults while loading.** Deploying three 'Mechs
+  satisfies `Logistics::requiredAssigned()`, the launch button at UI
+  `(517,330)-(624,348)` fires, the logistics layer tears down and the arena more
+  than doubles — 8.4 MB to 17.5 MB across 5,399 allocations — as mission assets
+  load. It then reads a null pointer:
+
+  ```
+  BriefingScreen::handleEvent (0x006DCD92, the StartScenario call)
+    -> Mission::StartScenario+0x3F6
+      -> Scenario::init+0x4F0B
+        -> ObjectMap::addObject+0xAD    bad read of 0x151
+  ```
+
+  That is the in-mission object layer, which nothing had exercised before.
 - **Each Ready Area entry draws only ~160 of its 2392 pixels** -- nine distinct
   palette indices, 2233 of them the wipe colour. This is NOT what blocks
   deployment: the entries are live objects with working hit-testing whether or

@@ -249,52 +249,50 @@ run. Add a case whenever a primitive is suspected: it is cheap, and it converts
   run_pipeline.py is for.
 
 ### Current bring-up stop
-**Deployment works.** The sequence that gets furthest:
+**The mission launches.** The sequence that does it, end to end:
 
-    MCG_CLICK="477,165@24;477,165@34;477,165@44;37,376>248,84@56"
+    MCG_CLICK="477,165@8;477,165@18;477,165@28;37,376>248,61@45;               37,376>304,61@55;37,376>246,172@65;570,339@78;570,339@90"
 
-New Campaign (fired three times, because startup speed varies enough that one
-fixed offset lands on the main menu only about half the time), then a drag from
-the first Ready Area entry to Force Group 1. The result is CURRENT DROP WEIGHT
-25 TONS and FORCE GROUP 1 reading 28 -- a 'Mech really is assigned.
+New Campaign (three times -- see the timing note below), three drags from the
+first Ready Area entry into Force Group 1 slots 1 and 2 and Force Group 2, then
+the launch button at UI (570,339). Watch `gate` climb 0 -> 25 -> 50 -> 75 as
+each 'Mech is assigned; once `requiredAssigned()` is satisfied the logistics
+layer tears down (the roster pointer goes null, `ovr` flips to -1) and the arena
+more than doubles, 8.4 MB -> 17.5 MB across 5,399 allocations. That is mission
+assets loading.
 
-That matters because it retires the theory this was stuck on for a long time:
-the Ready Area's thin rendering does NOT block deployment. The entries are live
-lObjects with working hit-testing whether or not they draw, so the drag lands
-on an invisible widget perfectly well. Do not go back to treating the drawing
-defect as the blocker.
+It then faults, in the mission rather than in logistics:
 
-**The launch button is at UI rect (517,330)-(624,348)** -- read straight out of
-BriefingScreen::handleEvent, which loads x0=0x205, y0=0x14A, x1=0x270, y1=0x15C
-into a rect at 0x006DCAC4 and hit-tests it. Clicking its centre, UI (570,339),
-does reach the handler. The game is refusing, not missing the click.
+    CheckMouse -> handleEvent -> BriefingScreen::handleEvent (0x006DCD92,
+      the Mission::StartScenario call site)
+      -> Mission::StartScenario+0x3F6
+        -> Scenario::init+0x4F0B
+          -> ObjectMap::addObject+0xAD   bad read of 0x151 (null page)
 
-The gate, in order (0x006DCAE8 onward):
+So the next frontier is `Scenario::init` populating the ObjectMap -- the
+in-mission object layer, which nothing has exercised before now.
 
-  [BriefingScreen + 0x4C8] != 0        -> button disabled, return
-  [0x8080A8] == 0                      -> playBettySample(0x1B), "not ready"
-  [0x8080A8] > [0x8080AC]              -> skip the next check
-  Logistics::requiredAssigned() == 0   -> fall through to...
-  [Logistics + 0x18BC] == 0            -> playBettySample(0x1B), "not ready"
+**Two timing traps, both of which wasted whole runs:**
+- `MCG_WATCH` does a **VirtualQuery syscall at every call boundary**. That is
+  fine for a short diagnostic and makes the game roughly a hundred times too
+  slow to drive: the message pump drops from ~27,000 peeks to ~90, so every
+  scripted click lands while the engine is still loading and appears to miss.
+  **Never leave it armed while scripting the UI.**
+- Hooking a hot function through `OVERRIDES` does the same thing for the same
+  reason -- `aPort::copyTo` is called for every blit in the game, and routing it
+  through the dispatcher had the identical effect. Instrumentation on a hot path
+  invalidates the measurement it is there to take.
 
-Past all that it plays sample 0x3A and calls Mission::StartScenario with
-[[Mission+0x24] + [Mission+0x20]*4] -- the current scenario's name. So the way
-in is to satisfy `requiredAssigned`, which is the mission's own requirement
-about WHICH units are deployed, not merely how many: one 'Mech in Force Group 1
-is not enough. Find what it checks and deploy accordingly.
+`MCG_CLICK` times are measured from `Mission::run` reaching state 3 -- the
+engine's own "logistics shell is up" signal -- not from process start, because
+the intro-movie sequence makes startup vary by tens of seconds. State 3 arrives
+slightly before the main menu is interactive, so the New Campaign click is still
+fired three times for safety.
 
-Note the wide bar beside the drop-weight readout IS this button -- clicking it
-with one 'Mech deployed undeploys rather than launching, which is the refusal
-path, not a separate control.
-
-Still open, but now known NOT to be in the way: each Ready Area cell draws only
-~160 of 2392 pixels (histogram: nine distinct palette indices, 2233 of them the
-wipe colour). The blit chain is intact and correctly aimed at every stage --
-aPort::copyTo is hooked and reports source size, destination rect, offset,
-transparency flag and whether any byte moved -- and half the 25x30 parts
-Logistics::drawMechBodyLoc composes leave the destination untouched, which for
-a transparent blit means an all-0xFF source. That may be the 'Mech's own armour
-data arriving empty rather than a drawing bug.
+Also still open, and known NOT to be in the way: each Ready Area cell draws only
+~160 of 2392 pixels. The entries are live lObjects with working hit-testing
+whether or not they draw, which is exactly why the drags land. Do not treat the
+drawing defect as a blocker.
 
 ### Bring-up diagnostics available (trace builds)
 - `--selftest` -- lifted CRT string primitives, `FitIniFile::textToLong` (the

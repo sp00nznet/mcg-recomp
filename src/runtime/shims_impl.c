@@ -1367,7 +1367,7 @@ static DWORD g_start_ms;
 static void clicks_init(void) {
     const char* s = getenv("MCG_CLICK");
     g_click_n = 0;
-    g_start_ms = GetTickCount();
+    g_start_ms = 0;            /* set when the logistics shell comes up */
     if (!s) return;
     while (*s && g_click_n < 8) {
         int x, y, x2, y2; double t;
@@ -1404,6 +1404,22 @@ static void clicks_init(void) {
  */
 static int click_now(int* x, int* y) {
     if (g_click_n < 0) clicks_init();
+    /*
+     * Times are measured from the moment the logistics shell comes up, not from
+     * process start. Startup speed varies by tens of seconds -- the intro-movie
+     * sequence is the culprit -- so a fixed wall-clock offset landed on the main
+     * menu only about half the time, and a missed first click wastes the whole
+     * run. Mission::run's state reaching 3 is the engine saying "the shell is
+     * ready", which is exactly the thing worth waiting for.
+     */
+    {
+        uint32_t mission = MEM32(0x008087A8u);
+        if (!g_start_ms) {
+            if (!mission || MEM32(mission) != 3) return 0;
+            g_start_ms = GetTickCount();
+            fprintf(stderr, "[input] logistics shell up; script starts now\n");
+        }
+    }
     unsigned now = GetTickCount() - g_start_ms;
     for (int i = 0; i < g_click_n; i++) {
         unsigned at = g_clicks[i].at_ms;

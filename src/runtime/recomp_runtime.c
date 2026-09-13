@@ -412,27 +412,41 @@ static DWORD WINAPI watchdog(LPVOID unused) {
                 }
             }
         }
+        /* The launch button's gate, in the order BriefingScreen::handleEvent
+         * tests it: [0x8080A8] must be non-zero at all, and then either above
+         * [0x8080AC] or requiredAssigned() true, else [Logistics+0x18BC]
+         * non-zero. [Logistics+0x18F4] short-circuits requiredAssigned. */
+        char gate[96] = "";
+        snprintf(gate, sizeof gate, " gate %d/%d req=%d ovr=%d",
+                 (int)MEM32(0x008080A8u), (int)MEM32(0x008080ACu),
+                 logi ? (int)MEM32(logi + 0x18BCu) : -1,
+                 logi ? (int)MEM32(logi + 0x18F4u) : -1);
+
         char mechs[128] = "";
         {
             uint32_t m = head;
             int n = 0, off = 0;
             while (m && n < 4 && off < (int)sizeof mechs - 24) {
-                off += snprintf(mechs + off, sizeof mechs - off, " [%d,%u]",
-                                (int)MEM32(m + 0xB4u), MEM32(m + 0x78u));
+                /* pilot / deployed / required. Logistics::requiredAssigned
+                 * returns true only when every 'Mech with [+0x7C] set also
+                 * has [+0x78] set, and that is the launch button's gate. */
+                off += snprintf(mechs + off, sizeof mechs - off, " [%d,%u,%u]",
+                                (int)MEM32(m + 0xB4u), MEM32(m + 0x78u),
+                                MEM32(m + 0x7Cu));
                 m = MEM32(m + 0x254u);
                 n++;
             }
         }
         fprintf(stderr, "[watchdog] func=0x%08X pc=0x%08X depth=%u "
                 "peek=%u dispatch=%u wndproc=%u | state=%d movie=%d mode=%d "
-                "play=%d roster=%08X/%08X mechs%s%s%s\n",
+                "play=%d roster=%08X/%08X mechs%s%s%s%s\n",
                 g_cur_func, pc, g_callstack_n,
                 g_n_peek, g_n_dispatch, g_n_wndproc,
                 mission ? (int)MEM32(mission) : -1,
                 mission ? (int)MEM32(mission + 0x14) : -1,
                 (int)MEM32(0x00808790u),
                 sys ? (int)MEM32(sys + 0xAECu) : -1, list, head,
-                mechs[0] ? mechs : " none", ready,
+                mechs[0] ? mechs : " none", gate, ready,
                 same ? "  (PC unchanged)" : "");
         if (same) {
             uint32_t n = g_callstack_n < CALLSTACK_MAX
@@ -784,9 +798,6 @@ static void mcg_setUpDeploy(void) {
     }
 }
 
-/* Set while a Ready Area entry is being built, so the copyTo report can show
- * only the blits that make up one cell instead of every blit in the game. */
-static int g_in_block_init;
 
 /* MechBriefBlock::init(LogMech*, lObject* parent, long x, long y) -- the
  * position each Ready Area entry is placed at, inside the scroll pane's port. */
@@ -795,7 +806,6 @@ static void mcg_MechBriefBlock_init(void) {
     static int shown;
     uint32_t self = g_ecx, mech = MEM32(g_esp + 4), parent = MEM32(g_esp + 8);
     int x = (int)MEM32(g_esp + 12), y = (int)MEM32(g_esp + 16);
-    g_in_block_init = 1;
     if (shown < 8) {
         shown++;
         /* The entries are placed into the scroll pane's own offscreen port.
@@ -812,7 +822,6 @@ static void mcg_MechBriefBlock_init(void) {
                 win ? (int)MEM32(win + 4) + 1 : -1, win ? (int)MEM32(win + 8) + 1 : -1);
     }
     recomp_MechBriefBlock__init_006DD7C0();
-    g_in_block_init = 0;
 }
 
 /*
@@ -845,83 +854,8 @@ static void mcg_BriefingScreen_ShowGUIWindow(void) {
             sp ? (int)MEM32(sp + 0x54u) : -1);
 }
 
-/*
- * lPort::init(char* name) -- does the art actually arrive?
- *
- * MechBriefBlock::drawBackground builds each Ready Area entry out of temporary
- * ports loaded by name and then copies them in. The copies are the part that
- * does not land, and the blitters underneath are all self-tested, so the
- * question is whether the source port has any pixels in it at all.
- */
-void recomp_lPort__init_007106D0(void);
-static void mcg_lPort_init_named(void) {
-    static int shown;
-    uint32_t self = g_ecx, name = MEM32(g_esp + 4);
-    recomp_lPort__init_007106D0();
-    if (shown < 24) {
-        uint32_t pane = MEM32(self + 0x10u), win = pane ? MEM32(pane) : 0;
-        size_t nz = 0, n = 0;
-        if (win) {
-            uint32_t w = MEM32(win + 4) + 1, h = MEM32(win + 8) + 1;
-            const uint8_t* px = (const uint8_t*)ADDR(MEM32(win));
-            n = (size_t)w * h;
-            for (size_t k = 0; k < n; k++) if (px[k]) nz++;
-            shown++;
-            fprintf(stderr, "[art] \"%s\" -> %ux%u, %zu/%zu non-zero\n",
-                    name ? (const char*)ADDR(name) : "(null)", w, h, nz, n);
-        } else {
-            shown++;
-            fprintf(stderr, "[art] \"%s\" -> NO WINDOW\n",
-                    name ? (const char*)ADDR(name) : "(null)");
-        }
-    }
-}
-
-/*
- * aPort::copyTo(dstPane, x, y, flag) -- every blit that builds one cell.
- *
- * Reported only while a Ready Area entry is under construction. drawBackground
- * assembles the cell through a chain of temporary ports, so the question is
- * which link in that chain loses the picture: each line gives the source's
- * size, the destination rectangle it is aimed at, the offset and the
- * transparency flag, and how many destination bytes actually changed.
- */
-void recomp_aPort__copyTo_0060CB40(void);
-static void mcg_aPort_copyTo(void) {
-    static int shown;
-    uint32_t self = g_ecx, dpane = MEM32(g_esp + 4);
-    int x = (int)MEM32(g_esp + 8), y = (int)MEM32(g_esp + 12);
-    int flag = (int)MEM32(g_esp + 16);
-    int report = g_in_block_init && shown < 20;
-    uint32_t spane = MEM32(self + 0x10u), swin = spane ? MEM32(spane) : 0;
-    uint32_t dwin = dpane ? MEM32(dpane) : 0;
-    size_t before = 0, after = 0, dn = 0;
-    const uint8_t* dp = NULL;
-
-    if (report && dwin) {
-        uint32_t w = MEM32(dwin + 4) + 1, h = MEM32(dwin + 8) + 1;
-        dp = (const uint8_t*)ADDR(MEM32(dwin));
-        dn = (size_t)w * h;
-        for (size_t k = 0; k < dn; k++) before += dp[k];
-    }
-    recomp_aPort__copyTo_0060CB40();
-    if (report) {
-        if (dp) for (size_t k = 0; k < dn; k++) after += dp[k];
-        shown++;
-        fprintf(stderr, "[blit] src %dx%d -> pane (%d,%d)-(%d,%d) at (%d,%d) "
-                "flag=%d  %s\n",
-                swin ? (int)MEM32(swin + 4) + 1 : -1,
-                swin ? (int)MEM32(swin + 8) + 1 : -1,
-                dpane ? (int)MEM32(dpane + 4) : -1, dpane ? (int)MEM32(dpane + 8) : -1,
-                dpane ? (int)MEM32(dpane + 12) : -1, dpane ? (int)MEM32(dpane + 16) : -1,
-                x, y, flag, before == after ? "NOTHING CHANGED" : "wrote");
-    }
-}
-
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     switch (va) {
-    case 0x0060CB40u: return mcg_aPort_copyTo;
-    case 0x007106D0u: return mcg_lPort_init_named;
     case 0x0060A780u: return mcg_aObject_ShowGUIWindow;
     case 0x006DCEF0u: return mcg_BriefingScreen_ShowGUIWindow;
     case 0x006DD410u: return mcg_setUpDeploy;
