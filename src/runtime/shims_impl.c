@@ -1356,10 +1356,11 @@ void imp_GetSystemMetrics(void) { RET((uint32_t)GetSystemMetrics((int)ARG(0))); 
  * Coordinates are the engine's own screen, NOT the window's client, so they
  * come straight back out of a widget dump.
  */
-#define CLICK_HOLD_MS   220      /* button held this long */
+#define CLICK_HOLD_MS   220      /* button held this long for a click */
+#define DRAG_HOLD_MS    900      /* ...and this long for a drag */
 #define CLICK_HOVER_MS  600      /* pointer parked this long either side */
 
-static struct { int x, y; unsigned at_ms; } g_clicks[8];
+static struct { int x, y, x2, y2, drag; unsigned at_ms; } g_clicks[8];
 static int g_click_n = -1;
 static DWORD g_start_ms;
 
@@ -1369,13 +1370,24 @@ static void clicks_init(void) {
     g_start_ms = GetTickCount();
     if (!s) return;
     while (*s && g_click_n < 8) {
-        int x, y; double t;
-        if (sscanf(s, "%d,%d@%lf", &x, &y, &t) != 3) break;
-        g_clicks[g_click_n].x = x;
-        g_clicks[g_click_n].y = y;
+        int x, y, x2, y2; double t;
+        if (sscanf(s, "%d,%d>%d,%d@%lf", &x, &y, &x2, &y2, &t) == 5) {
+            g_clicks[g_click_n].drag = 1;
+        } else if (sscanf(s, "%d,%d@%lf", &x, &y, &t) == 3) {
+            g_clicks[g_click_n].drag = 0;
+            x2 = x; y2 = y;
+        } else {
+            break;
+        }
+        g_clicks[g_click_n].x = x;   g_clicks[g_click_n].y = y;
+        g_clicks[g_click_n].x2 = x2; g_clicks[g_click_n].y2 = y2;
         g_clicks[g_click_n].at_ms = (unsigned)(t * 1000.0);
-        fprintf(stderr, "[input] scripted click %d: (%d,%d) at %.1fs\n",
-                g_click_n, x, y, t);
+        if (g_clicks[g_click_n].drag)
+            fprintf(stderr, "[input] scripted drag %d: (%d,%d) -> (%d,%d) at %.1fs\n",
+                    g_click_n, x, y, x2, y2, t);
+        else
+            fprintf(stderr, "[input] scripted click %d: (%d,%d) at %.1fs\n",
+                    g_click_n, x, y, t);
         g_click_n++;
         s = strchr(s, ';');
         if (!s) break;
@@ -1383,17 +1395,44 @@ static void clicks_init(void) {
     }
 }
 
-/* 0 = nothing scripted now, 1 = pointer parked there, 2 = and button down. */
+/*
+ * 0 = nothing scripted now, 1 = pointer parked there, 2 = and button down.
+ *
+ * A drag holds the button across a move, so the pointer walks from the source
+ * to the target in a few steps while it is down -- a widget that only notices
+ * the grab on a move would see nothing if it teleported.
+ */
 static int click_now(int* x, int* y) {
     if (g_click_n < 0) clicks_init();
     unsigned now = GetTickCount() - g_start_ms;
     for (int i = 0; i < g_click_n; i++) {
         unsigned at = g_clicks[i].at_ms;
-        if (now + CLICK_HOVER_MS < at || now > at + CLICK_HOLD_MS + CLICK_HOVER_MS)
+        unsigned hold = g_clicks[i].drag ? DRAG_HOLD_MS : CLICK_HOLD_MS;
+        if (now + CLICK_HOVER_MS < at || now > at + hold + CLICK_HOVER_MS)
             continue;
-        *x = g_clicks[i].x;
-        *y = g_clicks[i].y;
-        return (now >= at && now < at + CLICK_HOLD_MS) ? 2 : 1;
+        if (now < at) {                       /* hovering over the source */
+            *x = g_clicks[i].x;
+            *y = g_clicks[i].y;
+            return 1;
+        }
+        if (now >= at + hold) {               /* settled on the target */
+            *x = g_clicks[i].x2;
+            *y = g_clicks[i].y2;
+            return 1;
+        }
+        {   /* button down: hold the source briefly, then walk to the target */
+            unsigned into = now - at;
+            unsigned grab = hold / 4;
+            if (into < grab || !g_clicks[i].drag) {
+                *x = g_clicks[i].x;
+                *y = g_clicks[i].y;
+            } else {
+                unsigned num = into - grab, den = hold - grab;
+                *x = g_clicks[i].x + (int)((g_clicks[i].x2 - g_clicks[i].x) * (int)num / (int)den);
+                *y = g_clicks[i].y + (int)((g_clicks[i].y2 - g_clicks[i].y) * (int)num / (int)den);
+            }
+        }
+        return 2;
     }
     return 0;
 }

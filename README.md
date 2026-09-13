@@ -33,11 +33,11 @@ discovery heuristic in this repo because none is needed.
 | Phase | Status | Description |
 |-------|--------|-------------|
 | **Phase 0** | **Complete** | Binary triage, CodeView symbol recovery — **5,760 named functions, 98.7% of `.text`** |
-| **Phase 1** | **Complete** | x86 → C code generation — **5,981 functions, 0 lift errors**, 829K lines |
+| **Phase 1** | **Complete** | x86 → C code generation — **5,981 functions, 0 lift errors**, 1.49M lines |
 | **Phase 2** | **Complete** | Compilation — **13 objects, 0 errors, 0 warnings** (MSVC, `/W1`) |
 | **Phase 3** | **Complete** | Links and runs — **CRT startup completes, game code executes**, 204 import bridges |
-| **Phase 4** | **In progress** | Win32 + DirectX 6 HAL — **the game renders: title screen, menus, working mouse** |
-| Phase 5 | Pending | Engine abstraction — VFX rasteriser, terrain, sprite |
+| **Phase 4** | **In progress** | Win32 + DirectX 6 HAL — **renders and navigates: title, menus, campaign loads** |
+| **Phase 5** | **Started** | Engine abstraction — **the Briefing/Deployment screen renders in full** |
 | Phase 6 | Pending | Asset loading (FST / PAK / SHP / FIT) |
 | Phase 7+ | Pending | ABL script VM, logistics, mission layer, modern backend |
 
@@ -321,8 +321,11 @@ stack silently, whereas a null slot is reported by address.
 
 ### How far it gets
 
-It draws the game. The title screen, the main menu, and the screens behind it
-all render; the mouse cursor tracks and clicking a menu item navigates.
+It plays the menus. The title screen, the main menu and the logistics shell all
+render, the mouse tracks, and clicking **New Campaign** loads the campaign and
+reaches **Briefing/Deployment** -- which draws in full: the navigation column,
+the three force groups, the tactical map with its numbered objectives, drop
+weight, and a 'Mech loadout with armour, internals and payload.
 
 ```
 [runtime] mapped MCX.EXE at 0x00600000, 2.1 MB
@@ -378,23 +381,44 @@ same scale `present()` uses; `ClipCursor` and `SetCursorPos` speak those
 fullscreen coordinates too, so both became no-ops rather than confining or
 warping the host pointer.
 
+### The bug that was hiding behind everything
+
+`test a, b` leaves CF=0 and OF=0 and sets ZF/SF from `a & b`, so a condition
+after it compares that RESULT against zero -- not the two operands against each
+other. The lifter knew that and had the mapping, but the lookup was keyed on the
+raw mnemonic while the table is keyed on jcc spellings. So `jle` after a test
+correctly got `TEST_LE`, and `setle` after the identical test fell through to
+`CMP_LE(a, b)`.
+
+For the `test r, r` idiom that reads `r <= r`, true for every value a register
+can hold. `PacketFile::seekPacket` builds its return code out of exactly that
+sequence -- `xor/test/setle/dec/and/add`, where the success path relies on the
+add wrapping to zero -- so it returned its failure code on every call and
+`Logistics::loadCampaign` gave up with "could not find initial campaign file".
+Every `setcc` and `cmovcc` in the binary carrying an ordering condition off a
+test was wrong the same way, which is also why the menu widgets had spent days
+rendering as 2-pixel bars.
+
+Fixed upstream in pcrecomp, with ten difftest cases against hardware: each of
+`setle`/`setg`/`setl`/`setge`/`cmovle` after a test, run with the register
+positive, zero and negative, plus the whole `seekPacket` tail end to end.
+
 ### Where it stops
 
 Open, and honestly open rather than fixed:
 
-- **Widget faces do not reach the screen.** The menu items are laid out
-  correctly -- a column at x=390, 31px apart, each with its picture loaded and
-  its own port painted in full -- and the destination pane `lObject::display`
-  composites into is right (`(390,152)-(564,179)` in a 1280x1024 window). But a
-  watchpoint on that pixel in both candidate framebuffers never fires: nothing
-  writes there. The three blitters underneath (`VFX_pane_wipe`,
-  `VFX_pane_copy`, `DrawTransparent`) are covered by self-tests and are all
-  correct, so the loss is above the blit layer -- the composite is not being
-  reached for these objects. That is the next thread.
-- **`Mission::run` re-enters `aSystem::resetDirectDraw`** every few seconds,
-  leaking a surface each time. `SetDisplayMode2` dumps its caller's stack on the
-  second call, which is how that was found; why the flag at `0x7AB0E4` stays set
-  is not yet known.
+- **The Ready Area is empty**, so nothing can be deployed into a force group and
+  the launch control stays disabled. A pilot and a 'Mech are clearly loaded --
+  the detail panel shows both -- but the roster list draws nothing, and the
+  pilot's RANK field renders as the filename of a portrait image. Something in
+  the pilot record is being read one field out.
+  That is the next thread, and it is what stands between the briefing screen and
+  a mission.
+- **The nav column does not respond** to scripted clicks on the briefing screen
+  (MAIN MENU / PURCHASING / 'MECH BAY), though the main menu's own items do.
+- **The shell renders 640x480 into a 1280x1024 mode**, which the window then
+  stretches. Present #8700 reads exactly 307,200 source bytes, so this is the
+  engine's own choice rather than a presentation bug.
 - **Lifted `__sbh_alloc_block`** faults building a block footer from a local
   that holds a pointer where a size belongs. The runtime sets `___sbh_threshold`
   to 0 -- the CRT's own switch, what `_set_sbh_threshold()` writes -- so

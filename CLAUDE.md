@@ -249,26 +249,24 @@ run. Add a case whenever a primitive is suspected: it is cheap, and it converts
   run_pipeline.py is for.
 
 ### Current bring-up stop
-The game renders. Title screen, main menu and the screens behind it all draw,
-the mouse cursor tracks the pointer, and clicking a menu item navigates. The
-frame loop runs for minutes without faulting, under
-`WinMain -> RealWinMain -> aSystem::run -> aCallback::exec -> RunMission ->
-Mission::run`.
+The campaign loads. Clicking **New Campaign** reaches **Briefing/Deployment**
+and it renders in full -- navigation column, three force groups, the tactical
+map with its numbered objectives, drop weight, and a 'Mech loadout with armour,
+internals and payload. `Mission::run`'s state machine (a jump table on
+`this->state` at `[0x8087A8]`) settles at state 3, the logistics shell. States
+10 and 8 are the intro-movie sequence; it completes in the first few seconds,
+and the repeated `SetDisplayMode2` calls are it restoring the display between
+movies, not a loop.
 
-What is still wrong: **widget faces never reach the screen**. The menu items are
-laid out correctly -- a column at `x=390`, 31px apart, each with its picture
-loaded and its own port painted in full -- and the destination pane
-`lObject::display` composites into is right, `(390,152)-(564,179)` in a
-1280x1024 window. But `MCG_WATCH` on that pixel in both candidate framebuffers
-(the engine's `CreateDIBSection` bits and the DirectDraw surface) never fires:
-nothing writes there. So the composite is not being reached for these objects.
-`lObject::display` (0x00710E20) IS called ~21k times a run, but never with one
-of these objects -- find out who is meant to call it and does not.
+What stops a mission starting: **the Ready Area is empty**, so nothing can be
+deployed into a force group and the launch control beside the drop-weight bar
+stays disabled. A pilot and a 'Mech are clearly loaded -- the detail panel shows
+both -- but the roster list draws nothing and the pilot's RANK field renders as
+the filename of a portrait image, so a field in the pilot record is being read
+one slot out. Find that, and deployment should follow.
 
-Also open: `Mission::run` re-enters `aSystem::resetDirectDraw` every few
-seconds, leaking a surface each time. `SetDisplayMode2` dumps its caller's stack
-on the second call, which is how that was found; the flag at `0x7AB0E4` staying
-set is unexplained.
+Also open: the briefing screen's nav column (MAIN MENU / PURCHASING / 'MECH BAY)
+does not respond to scripted clicks, though the main menu's own items do.
 
 ### Bring-up diagnostics available (trace builds)
 - `--selftest` -- lifted CRT string primitives, `FitIniFile::textToLong` (the
