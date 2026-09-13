@@ -88,6 +88,7 @@ OVERRIDES = {
     0x00763EDA: '__fassign -- strtod natively; the long double path zeroed ebp',
     0x006DD410: 'BriefingScreen::setUpDeploy -- report what the Ready Area got',
     0x006DD7C0: 'MechBriefBlock::init -- report where each Ready Area entry lands',
+    0x006BB4D0: 'ObjectMap::addObject -- report the map cell index it derives',
 }
 
 

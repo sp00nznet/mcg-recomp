@@ -37,7 +37,7 @@ discovery heuristic in this repo because none is needed.
 | **Phase 2** | **Complete** | Compilation — **13 objects, 0 errors, 0 warnings** (MSVC, `/W1`) |
 | **Phase 3** | **Complete** | Links and runs — **CRT startup completes, game code executes**, 204 import bridges |
 | **Phase 4** | **In progress** | Win32 + DirectX 6 HAL — **renders and navigates: title, menus, campaign loads** |
-| **Phase 5** | **In progress** | Engine abstraction — **a mission launches; loading faults in `Scenario::init`** |
+| **Phase 5** | **In progress** | Engine abstraction — **a mission runs; the tactical view faults in `AG_ellipse_fill`** |
 | Phase 6 | Pending | Asset loading (FST / PAK / SHP / FIT) |
 | Phase 7+ | Pending | ABL script VM, logistics, mission layer, modern backend |
 
@@ -407,20 +407,22 @@ positive, zero and negative, plus the whole `seekPacket` tail end to end.
 
 Open, and honestly open rather than fixed:
 
-- **A mission launches, then faults while loading.** Deploying three 'Mechs
-  satisfies `Logistics::requiredAssigned()`, the launch button at UI
-  `(517,330)-(624,348)` fires, the logistics layer tears down and the arena more
-  than doubles — 8.4 MB to 17.5 MB across 5,399 allocations — as mission assets
-  load. It then reads a null pointer:
+- **A mission runs; the battlefield view faults.** Deploying three 'Mechs
+  satisfies `Logistics::requiredAssigned()`, the launch button fires,
+  `Scenario::init` populates the ObjectMap correctly (cells 37–66, valid bucket
+  pointers — the world-to-map-cell float maths is sound), and control reaches
+  the in-mission frame loop. It then reads a null pointer while drawing units:
 
   ```
-  BriefingScreen::handleEvent (0x006DCD92, the StartScenario call)
-    -> Mission::StartScenario+0x3F6
-      -> Scenario::init+0x4F0B
-        -> ObjectMap::addObject+0xAD    bad read of 0x151
+  RunMission -> Mission::run -> UpdateDisplay+0x1A0
+    -> TacticalMap::display+0x8A4
+      -> TacticalMap::drawObjects+0xAD9
+        -> AG_ellipse_fill      ecx=FFFFFFFF, bad read of 3
   ```
 
-  That is the in-mission object layer, which nothing had exercised before.
+  `ecx` is a count gone negative — the same shape as the VFX blitter bugs, a
+  hand-written asm primitive whose loop bound the lifter mis-derived. The fix
+  route is a `--selftest` case, which is how each of those was settled.
 - **Each Ready Area entry draws only ~160 of its 2392 pixels** -- nine distinct
   palette indices, 2233 of them the wipe colour. This is NOT what blocks
   deployment: the entries are live objects with working hit-testing whether or

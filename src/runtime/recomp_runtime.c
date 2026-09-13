@@ -854,8 +854,37 @@ static void mcg_BriefingScreen_ShowGUIWindow(void) {
             sp ? (int)MEM32(sp + 0x54u) : -1);
 }
 
+/*
+ * ObjectMap::addObject -- which cell does it decide the object belongs in?
+ *
+ * The body calls a virtual that writes a map-cell index back over its own first
+ * argument, then indexes [this+0xC] with it. Loading a mission faults there
+ * reading 0x151, i.e. buckets[index] came back as the small integer 0x149
+ * rather than a pointer -- so the index is out of range. The index is derived
+ * from ScenarioMap::worldToMapPos, which is float math, and this lifter's x87
+ * is its weakest area. Print the index and the array so the range is a fact
+ * rather than a guess.
+ */
+void recomp_ObjectMap__addObject_006BB4D0(void);
+static void mcg_ObjectMap_addObject(void) {
+    static int shown;
+    /* The callee overwrites its own first argument with the cell index, and
+     * that slot lives in the caller's stack, so remember where it is and read
+     * it back afterwards -- `ret 4` will have moved esp by then. */
+    uint32_t self = g_ecx, slot = g_esp + 4, obj = MEM32(slot);
+    uint32_t buckets = MEM32(self + 0x0Cu);
+    recomp_ObjectMap__addObject_006BB4D0();
+    if (shown < 16) {
+        uint32_t idx = MEM32(slot);
+        shown++;
+        fprintf(stderr, "[objmap] obj=%08X buckets=%08X cell=%u -> %08X\n",
+                obj, buckets, idx, buckets ? MEM32(buckets + idx * 4u) : 0);
+    }
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     switch (va) {
+    case 0x006BB4D0u: return mcg_ObjectMap_addObject;
     case 0x0060A780u: return mcg_aObject_ShowGUIWindow;
     case 0x006DCEF0u: return mcg_BriefingScreen_ShowGUIWindow;
     case 0x006DD410u: return mcg_setUpDeploy;

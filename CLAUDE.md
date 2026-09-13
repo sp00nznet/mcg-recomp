@@ -249,50 +249,57 @@ run. Add a case whenever a primitive is suspected: it is cheap, and it converts
   run_pipeline.py is for.
 
 ### Current bring-up stop
-**The mission launches.** The sequence that does it, end to end:
+**The mission runs.** The sequence that gets there:
 
-    MCG_CLICK="477,165@8;477,165@18;477,165@28;37,376>248,61@45;               37,376>304,61@55;37,376>246,172@65;570,339@78;570,339@90"
+    MCG_CLICK="477,165@8;477,165@18;477,165@28;37,376>248,61@45;
+               37,376>304,61@55;37,376>246,172@65;570,339@78;570,339@90"
 
-New Campaign (three times -- see the timing note below), three drags from the
-first Ready Area entry into Force Group 1 slots 1 and 2 and Force Group 2, then
-the launch button at UI (570,339). Watch `gate` climb 0 -> 25 -> 50 -> 75 as
-each 'Mech is assigned; once `requiredAssigned()` is satisfied the logistics
-layer tears down (the roster pointer goes null, `ovr` flips to -1) and the arena
-more than doubles, 8.4 MB -> 17.5 MB across 5,399 allocations. That is mission
-assets loading.
+New Campaign (three times, see the timing note), three drags from the first
+Ready Area entry into Force Group 1 slots 1 and 2 and Force Group 2, then the
+launch button at UI (570,339). Watch `gate` climb 0 -> 25 -> 50 -> 75 as each
+'Mech is assigned; once requiredAssigned() is satisfied the logistics layer
+tears down and the arena more than doubles, 8.4 MB -> 17.5 MB, as mission
+assets load.
 
-It then faults, in the mission rather than in logistics:
+Scenario::init then populates the ObjectMap successfully -- `[objmap]` reports
+cells 37, 38, 39, 53, 54, 63, 64, 66 with valid bucket pointers, so the
+world-to-map-cell float maths is fine -- and control reaches the in-mission
+frame loop:
 
-    CheckMouse -> handleEvent -> BriefingScreen::handleEvent (0x006DCD92,
-      the Mission::StartScenario call site)
-      -> Mission::StartScenario+0x3F6
-        -> Scenario::init+0x4F0B
-          -> ObjectMap::addObject+0xAD   bad read of 0x151 (null page)
+    RunMission -> Mission::run+0x299 -> ... -> UpdateDisplay+0x1A0
+      -> TacticalMap::display+0x8A4
+        -> TacticalMap::drawObjects+0xAD9
+          -> AG_ellipse_fill        bad read of 3, ecx=FFFFFFFF edx=2
 
-So the next frontier is `Scenario::init` populating the ObjectMap -- the
-in-mission object layer, which nothing has exercised before now.
+So the battlefield view is being drawn and the fault is in `AG_ellipse_fill`
+(0x006B6970) -- the filled ellipse under each unit. `ecx=FFFFFFFF` is a count
+that has gone negative, which is the same shape as the VFX blitter bugs: a
+hand-written asm primitive whose loop bound the lifter got wrong. Give it a
+`--selftest` case the way VFX_pane_wipe/VFX_pane_copy/DrawTransparent have
+one -- that is how each of those was settled.
 
-**Two timing traps, both of which wasted whole runs:**
-- `MCG_WATCH` does a **VirtualQuery syscall at every call boundary**. That is
-  fine for a short diagnostic and makes the game roughly a hundred times too
-  slow to drive: the message pump drops from ~27,000 peeks to ~90, so every
-  scripted click lands while the engine is still loading and appears to miss.
-  **Never leave it armed while scripting the UI.**
-- Hooking a hot function through `OVERRIDES` does the same thing for the same
-  reason -- `aPort::copyTo` is called for every blit in the game, and routing it
-  through the dispatcher had the identical effect. Instrumentation on a hot path
-  invalidates the measurement it is there to take.
+Also seen in the same run and not yet chased:
+`[game:Fatal] code=0x80004001 " Unable to Set Display Mode "` --
+DDERR_UNSUPPORTED out of the mock's SetDisplayMode during the mission's own
+display reset.
 
-`MCG_CLICK` times are measured from `Mission::run` reaching state 3 -- the
-engine's own "logistics shell is up" signal -- not from process start, because
-the intro-movie sequence makes startup vary by tens of seconds. State 3 arrives
-slightly before the main menu is interactive, so the New Campaign click is still
-fired three times for safety.
+**Two timing traps, both of which silently wasted whole runs:**
+- `MCG_WATCH` does a **VirtualQuery syscall at every call boundary**. Fine for a
+  short diagnostic; it makes the game about a hundred times too slow to drive
+  (the pump drops from ~27,000 peeks to ~90), so every scripted click lands
+  mid-load and looks like a miss. **Never leave it armed while scripting.**
+- Hooking a hot function through `OVERRIDES` does the same for the same reason.
+  `aPort::copyTo` runs for every blit in the game. Instrumentation on a hot path
+  invalidates the measurement it exists to take.
 
-Also still open, and known NOT to be in the way: each Ready Area cell draws only
-~160 of 2392 pixels. The entries are live lObjects with working hit-testing
-whether or not they draw, which is exactly why the drags land. Do not treat the
-drawing defect as a blocker.
+`MCG_CLICK` times run from `Mission::run` reaching state 3 -- the engine's own
+"logistics shell is up" signal -- because the intro movies make startup vary by
+tens of seconds. State 3 lands slightly before the menu is interactive, so the
+New Campaign click is fired three times for safety.
+
+Known and NOT in the way: each Ready Area cell draws only ~160 of 2392 pixels.
+The entries are live lObjects with working hit-testing whether or not they draw,
+which is exactly why the drags land.
 
 ### Bring-up diagnostics available (trace builds)
 - `--selftest` -- lifted CRT string primitives, `FitIniFile::textToLong` (the
