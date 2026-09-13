@@ -842,6 +842,142 @@ static int crt_selftest(void) {
         }
     }
 
+    /*
+     * VFX_pane_wipe -- the flat-colour fill every widget falls back to when it
+     * has no picture, and a member of the same hand-written VFX blit family
+     * whose `rep movs` ignored the direction flag. It clips the rectangle
+     * against the window, then fills each row as `and ecx,3; rep stosb` for the
+     * remainder followed by `shr ecx,2; rep stosd`, which is exactly the shape
+     * a lifter gets wrong one byte at a time.
+     *
+     *   window { uint8_t* buffer; int32_t x_max, y_max; }   (inclusive maxima)
+     *   pane   { window* w; int32_t x0, y0, x1, y1; }       (inclusive corners)
+     */
+    {
+        const uint32_t PANE_WIPE = 0x0076F7CC;
+        const int W = 16, H = 8;
+        uint32_t buf = shims_alloc(W * H);
+        uint32_t win = shims_alloc(12), pane = shims_alloc(20), a[2];
+        int x0 = 2, y0 = 1, x1 = 9, y1 = 5, bad = 0;
+        const uint8_t* px = (const uint8_t*)ADDR(buf);
+
+        memset((void*)ADDR(buf), 0, W * H);
+        MEM32(win) = buf; MEM32(win + 4) = W - 1; MEM32(win + 8) = H - 1;
+        MEM32(pane) = win;
+        MEM32(pane + 4) = (uint32_t)x0; MEM32(pane + 8)  = (uint32_t)y0;
+        MEM32(pane + 12) = (uint32_t)x1; MEM32(pane + 16) = (uint32_t)y1;
+
+        a[0] = pane; a[1] = 0xAB;
+        expect("VFX_pane_wipe returns 0", call_lifted(PANE_WIPE, 2, a), 0);
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                int inside = (x >= x0 && x <= x1 && y >= y0 && y <= y1);
+                if (px[y * W + x] != (inside ? 0xAB : 0x00)) bad++;
+            }
+        expect("VFX_pane_wipe 8x5 rect", (uint32_t)bad, 0);
+        if (bad) {
+            for (int y = 0; y < H; y++) {
+                fprintf(stderr, "         ");
+                for (int x = 0; x < W; x++)
+                    fputc(px[y * W + x] ? '#' : '.', stderr);
+                fputc('\n', stderr);
+            }
+        }
+    }
+
+    /*
+     * VFX_pane_copy(src, sx, sy, dst, dx, dy, transparent) -- the blit every
+     * widget with a picture goes through (lButton::draw -> aPort::copyTo).
+     * Its `rep movs` already had to be taught the direction flag once; this
+     * pins the result down instead of inferring it from what the screen looks
+     * like.
+     */
+    {
+        const uint32_t PANE_COPY = 0x0076F8AB;
+        const int SW = 16, SH = 8, DW = 24, DH = 12, DX = 4, DY = 2;
+        uint32_t sbuf = shims_alloc(SW * SH), dbuf = shims_alloc(DW * DH);
+        uint32_t swin = shims_alloc(12), dwin = shims_alloc(12);
+        uint32_t spane = shims_alloc(20), dpane = shims_alloc(20), a[7];
+        uint8_t* sp = (uint8_t*)ADDR(sbuf);
+        const uint8_t* dp = (const uint8_t*)ADDR(dbuf);
+        int bad = 0;
+
+        for (int i = 0; i < SW * SH; i++) sp[i] = (uint8_t)(i | 1);
+        memset((void*)ADDR(dbuf), 0, DW * DH);
+        MEM32(swin) = sbuf; MEM32(swin + 4) = SW - 1; MEM32(swin + 8) = SH - 1;
+        MEM32(dwin) = dbuf; MEM32(dwin + 4) = DW - 1; MEM32(dwin + 8) = DH - 1;
+        MEM32(spane) = swin; MEM32(spane + 4) = 0; MEM32(spane + 8) = 0;
+        MEM32(spane + 12) = SW - 1; MEM32(spane + 16) = SH - 1;
+        MEM32(dpane) = dwin; MEM32(dpane + 4) = 0; MEM32(dpane + 8) = 0;
+        MEM32(dpane + 12) = DW - 1; MEM32(dpane + 16) = DH - 1;
+
+        a[0] = spane; a[1] = 0; a[2] = 0;
+        a[3] = dpane; a[4] = DX; a[5] = DY; a[6] = 0xFFFFFFFFu;  /* opaque */
+        expect("VFX_pane_copy returns 0", call_lifted(PANE_COPY, 7, a), 0);
+        for (int y = 0; y < DH; y++)
+            for (int x = 0; x < DW; x++) {
+                int in = (x >= DX && x < DX + SW && y >= DY && y < DY + SH);
+                uint8_t want = in ? sp[(y - DY) * SW + (x - DX)] : 0;
+                if (dp[y * DW + x] != want) bad++;
+            }
+        expect("VFX_pane_copy 16x8 at (4,2)", (uint32_t)bad, 0);
+        if (bad) {
+            for (int y = 0; y < DH; y++) {
+                fprintf(stderr, "         ");
+                for (int x = 0; x < DW; x++)
+                    fputc(dp[y * DW + x] ? '#' : '.', stderr);
+                fputc('\n', stderr);
+            }
+        }
+    }
+
+    /*
+     * DrawTransparent(dst_pane, src_window, x, y, w, h) -- what actually puts
+     * a widget's port on the screen (lObject::draw -> aPort::copyTo with a
+     * non-zero flag). 22 is deliberately not a multiple of 4: these VFX-style
+     * blitters copy `w & 3` bytes with rep movsb and the rest with rep movsd,
+     * so an aligned width tests only half the loop.
+     */
+    {
+        const uint32_t DRAW_TRANS = 0x006B6F20;
+        const int SW = 22, SH = 6, DW = 64, DH = 24, DX = 17, DY = 5;
+        uint32_t sbuf = shims_alloc(SW * SH), dbuf = shims_alloc(DW * DH);
+        uint32_t swin = shims_alloc(12), dwin = shims_alloc(12);
+        uint32_t dpane = shims_alloc(20), a[6];
+        uint8_t* sp = (uint8_t*)ADDR(sbuf);
+        const uint8_t* dp = (const uint8_t*)ADDR(dbuf);
+        int bad = 0;
+
+        for (int i = 0; i < SW * SH; i++) sp[i] = (uint8_t)(i | 1);
+        memset((void*)ADDR(dbuf), 0, DW * DH);
+        MEM32(swin) = sbuf; MEM32(swin + 4) = SW - 1; MEM32(swin + 8) = SH - 1;
+        MEM32(dwin) = dbuf; MEM32(dwin + 4) = DW - 1; MEM32(dwin + 8) = DH - 1;
+        /* The real caller (lObject::display) hands over a pane that already
+         * carries the widget's position and passes x=y=0, so the offset has to
+         * come out of the pane -- a pane anchored at the origin would leave
+         * that half of the arithmetic untested. */
+        MEM32(dpane) = dwin; MEM32(dpane + 4) = DX; MEM32(dpane + 8) = DY;
+        MEM32(dpane + 12) = DX + SW - 1; MEM32(dpane + 16) = DY + SH - 1;
+
+        a[0] = dpane; a[1] = swin; a[2] = 0; a[3] = 0; a[4] = SW; a[5] = SH;
+        call_lifted(DRAW_TRANS, 6, a);
+        for (int y = 0; y < DH; y++)
+            for (int x = 0; x < DW; x++) {
+                int in = (x >= DX && x < DX + SW && y >= DY && y < DY + SH);
+                uint8_t want = in ? sp[(y - DY) * SW + (x - DX)] : 0;
+                if (dp[y * DW + x] != want) bad++;
+            }
+        expect("DrawTransparent 22x6 at (3,2)", (uint32_t)bad, 0);
+        if (bad) {
+            for (int y = 0; y < DH; y++) {
+                fprintf(stderr, "         ");
+                for (int x = 0; x < DW; x++)
+                    fputc(dp[y * DW + x] ? '#' : '.', stderr);
+                fputc('\n', stderr);
+            }
+        }
+    }
+
     fprintf(stderr, "=== %s (%d failure%s) ===\n",
             g_st_fail ? "FAILURES" : "all passed", g_st_fail,
             g_st_fail == 1 ? "" : "s");

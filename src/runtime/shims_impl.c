@@ -532,8 +532,11 @@ void imp_CreateFileA(void) {
     HANDLE h = CreateFileA(name, ARG(1), ARG(2), NULL, ARG(4), ARG(5), NULL);
     if (h == INVALID_HANDLE_VALUE) {
         g_last_error = GetLastError();
-        static int shown;         /* only the misses: they say what is sought */
-        if (shown < 24) {
+        /* Only the misses: they say what the engine is looking for. The cap
+         * used to be 24, which is exactly how many font files it probes before
+         * falling back to the packfile -- so every later miss was swallowed. */
+        static int shown;
+        if (shown < 60) {
             fprintf(stderr, "[media] CreateFileA(\"%s\") MISS\n",
                     name ? name : "(null)");
             shown++;
@@ -1156,7 +1159,7 @@ static LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
                 (unsigned)wp);
         wp = TRUE;
     }
-    { static int shown; if (shown < 12) { shown++;
+    { static int shown; if (shown < 24) { shown++;
         fprintf(stderr, "[win] wndproc msg=%04X (depth %d)\n", msg,
                 g_wndproc_depth); } }
     cur_msg_t outer = g_cur_msg;            /* nested dispatches nest correctly */
