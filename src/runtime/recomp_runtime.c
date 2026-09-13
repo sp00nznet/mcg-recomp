@@ -338,15 +338,30 @@ static DWORD WINAPI watchdog(LPVOID unused) {
         uint32_t head = list ? MEM32(list) : 0;
         uint32_t list2 = logi ? MEM32(logi + 0x1D0u) : 0;
         uint32_t head2 = list2 ? MEM32(list2) : 0;
+        /* setUpDeploy only builds a Ready Area entry for a 'Mech whose
+         * [+0xB4] is above -1 and whose [+0x78] is zero, so those two fields
+         * decide whether the list draws anything at all. Walk the first few. */
+        char mechs[128] = "";
+        {
+            uint32_t m = head;
+            int n = 0, off = 0;
+            while (m && n < 4 && off < (int)sizeof mechs - 24) {
+                off += snprintf(mechs + off, sizeof mechs - off, " [%d,%u]",
+                                (int)MEM32(m + 0xB4u), MEM32(m + 0x78u));
+                m = MEM32(m + 0x254u);
+                n++;
+            }
+        }
         fprintf(stderr, "[watchdog] func=0x%08X pc=0x%08X depth=%u "
                 "peek=%u dispatch=%u wndproc=%u | state=%d movie=%d mode=%d "
-                "play=%d roster=%08X/%08X %08X/%08X%s\n",
+                "play=%d roster=%08X/%08X %08X/%08X mechs%s%s\n",
                 g_cur_func, pc, g_callstack_n,
                 g_n_peek, g_n_dispatch, g_n_wndproc,
                 mission ? (int)MEM32(mission) : -1,
                 mission ? (int)MEM32(mission + 0x14) : -1,
                 (int)MEM32(0x00808790u),
                 sys ? (int)MEM32(sys + 0xAECu) : -1, list, head, list2, head2,
+                mechs[0] ? mechs : " none",
                 same ? "  (PC unchanged)" : "");
         if (same) {
             uint32_t n = g_callstack_n < CALLSTACK_MAX
@@ -659,8 +674,74 @@ static void mcg_Assert(void) {
     g_esp += 4;                          /* __cdecl */
 }
 
+/*
+ * BriefingScreen::setUpDeploy -- report what the Ready Area was given.
+ *
+ * It builds one entry per roster 'Mech that has a pilot ([+0xB4] above -1) and
+ * a zero at [+0x78], counting them into [this+0x4BC] and then sizing an array
+ * from that count. An empty Ready Area is either "the roster was empty when
+ * this ran" or "it was not empty and the entries did not draw", and those are
+ * different bugs -- so print the roster and the count it derived, each time.
+ */
+void recomp_BriefingScreen__setUpDeploy_006DD410(void);
+static void mcg_setUpDeploy(void) {
+    uint32_t self = g_ecx;
+    uint32_t logi = MEM32(0x00808634u);
+    uint32_t list = logi ? MEM32(logi + 0x1CCu) : 0;
+    uint32_t m = list ? MEM32(list) : 0;
+    int roster = 0;
+    for (; m && roster < 64; m = MEM32(m + 0x254u)) roster++;
+    recomp_BriefingScreen__setUpDeploy_006DD410();
+    fprintf(stderr, "[deploy] setUpDeploy: %d in the roster -> %d entries\n",
+            roster, (int)MEM32(self + 0x4BCu));
+    {   /* The scroll pane the entries were parented to: does it own them, is
+         * it visible, and where does it composite itself? */
+        uint32_t sp = MEM32(self + 0x5C0u);
+        uint32_t out = sp ? MEM32(sp + 8u) : 0;
+        /* Tried and did NOT work, so it is not shipped and should not be
+         * retried: forcing [+0x54] to 1 on the pane, and on all three
+         * children, leaves the Ready Area just as blank. The flag is one
+         * reason lObject::display bails, but it is not the only one -- look
+         * further down that function (it also tests [+0x60] and the virtual
+         * at vtable+0x10C) before blaming whoever fails to show the pane. */
+        fprintf(stderr, "[deploy] pane %08X children=%d visible=%d -> "
+                "(%d,%d)-(%d,%d)\n", sp,
+                sp ? (int)MEM32(sp + 0x470u) : -1,
+                sp ? (int)MEM32(sp + 0x54u) : -1,
+                out ? (int)MEM32(out + 4) : -1, out ? (int)MEM32(out + 8) : -1,
+                out ? (int)MEM32(out + 12) : -1, out ? (int)MEM32(out + 16) : -1);
+    }
+}
+
+/* MechBriefBlock::init(LogMech*, lObject* parent, long x, long y) -- the
+ * position each Ready Area entry is placed at, inside the scroll pane's port. */
+void recomp_MechBriefBlock__init_006DD7C0(void);
+static void mcg_MechBriefBlock_init(void) {
+    static int shown;
+    uint32_t self = g_ecx, mech = MEM32(g_esp + 4), parent = MEM32(g_esp + 8);
+    int x = (int)MEM32(g_esp + 12), y = (int)MEM32(g_esp + 16);
+    if (shown < 8) {
+        shown++;
+        /* The entries are placed into the scroll pane's own offscreen port.
+         * If that port has no height, every position in it is correct and
+         * invisible -- so print the rectangle they are being placed into. */
+        uint32_t pp = parent ? MEM32(parent + 0x4ACu) : 0;
+        uint32_t pane = pp ? MEM32(pp + 0x10u) : 0;
+        uint32_t win = pane ? MEM32(pane) : 0;
+        fprintf(stderr, "[deploy] block %08X mech=%08X parent=%08X at (%d,%d) "
+                "into port %08X pane (%d,%d)-(%d,%d) win %dx%d\n",
+                self, mech, parent, x, y, pp,
+                pane ? (int)MEM32(pane + 4) : -1, pane ? (int)MEM32(pane + 8) : -1,
+                pane ? (int)MEM32(pane + 12) : -1, pane ? (int)MEM32(pane + 16) : -1,
+                win ? (int)MEM32(win + 4) + 1 : -1, win ? (int)MEM32(win + 8) + 1 : -1);
+    }
+    recomp_MechBriefBlock__init_006DD7C0();
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     switch (va) {
+    case 0x006DD410u: return mcg_setUpDeploy;
+    case 0x006DD7C0u: return mcg_MechBriefBlock_init;
     case 0x00644250u: return mcg_Assert;       /* Assert    */
     case 0x00760D27u: return mcg_initterm;     /* _initterm */
     case 0x00763EDAu: return mcg_fassign;      /* __fassign  */

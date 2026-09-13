@@ -86,6 +86,8 @@ OVERRIDES = {
     0x00644250: 'Assert -- surface the engine diagnostic; the lift clobbers ebp',
     0x00760D27: '_initterm -- probe: every ctor must leave esp exactly as found',
     0x00763EDA: '__fassign -- strtod natively; the long double path zeroed ebp',
+    0x006DD410: 'BriefingScreen::setUpDeploy -- report what the Ready Area got',
+    0x006DD7C0: 'MechBriefBlock::init -- report where each Ready Area entry lands',
 }
 
 
