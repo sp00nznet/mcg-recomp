@@ -80,6 +80,7 @@ void*    shims_handle(uint32_t v);   /* 32-bit handle -> host pointer */
 uint32_t      ddraw_create(void);
 uint32_t      dsound_create(void);
 uint32_t      dplay_lobby_create(void);
+uint32_t      dplay_create(void);
 recomp_func_t ddraw_lookup(uint32_t va);   /* resolves every COM method VA */
 
 /* Region bounds, so VirtualQuery can answer without duplicating the layout. */

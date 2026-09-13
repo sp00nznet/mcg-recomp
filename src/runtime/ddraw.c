@@ -767,6 +767,19 @@ static void dp_EnumConnections(void) {
     STDRET(5);
 }
 
+/* IDirectPlayLobby::GetConnectionSettings (slot 8).
+ *
+ * SessionManager::WasLaunchedFromLobby creates a lobby, calls this, and tests
+ * the result against DPERR_NOTLOBBIED -- in which case it concludes the game
+ * was started normally. That is the truth here, and it is the answer the engine
+ * is best equipped to handle. */
+#define DPERR_NOTLOBBIED 0x8877042Eu
+
+static void dp_GetConnectionSettings(void) {
+    RET(DPERR_NOTLOBBIED);
+    STDRET(4);
+}
+
 static uint32_t g_vt_dp3;
 
 static void dp_QueryInterface(void) {
@@ -844,27 +857,38 @@ uint32_t ddraw_create(void) {
     return obj;
 }
 
+/* IDirectPlay3A: only EnumConnections (slot 35) is on the startup path.
+ * Everything else stays null on purpose -- an unimplemented COM method has no
+ * argument count we could guess, and a wrong STDRET would desync the stack
+ * silently, whereas a null slot is reported by address. */
+static recomp_func_t g_dp3_vt[47];
+static recomp_func_t g_lobby_vt[14];
+
+static void dplay_build_vtables(void) {
+    if (g_vt_dp3) return;
+    g_dp3_vt[0] = dp_QueryInterface;
+    g_dp3_vt[1] = dp_AddRef;
+    g_dp3_vt[2] = dp_Release;
+    g_dp3_vt[35] = dp_EnumConnections;
+    g_vt_dp3 = build_vtable(g_dp3_vt, 47);
+    g_lobby_vt[0] = dp_QueryInterface;
+    g_lobby_vt[1] = dp_AddRef;
+    g_lobby_vt[2] = dp_Release;
+    g_lobby_vt[8] = dp_GetConnectionSettings;
+}
+
+/* What CoCreateInstance(CLSID_DirectPlay, IID_IDirectPlay3A) hands back -- the
+ * route this engine actually takes. */
+uint32_t dplay_create(void) {
+    dplay_build_vtables();
+    uint32_t obj = new_object(g_vt_dp3, KIND_DPLAY, 0);
+    fprintf(stderr, "[dplay] IDirectPlay3A -> object 0x%08X\n", obj);
+    return obj;
+}
+
 uint32_t dplay_lobby_create(void) {
-    /* IDirectPlay3A: only EnumConnections (slot 35) is on the startup path.
-     * Everything else stays null on purpose -- an unimplemented COM method has
-     * no argument count we could guess, and a wrong STDRET would desync the
-     * stack silently, whereas a null slot is reported by address. */
-    static recomp_func_t dp3_vt[47];
-    static recomp_func_t lobby_vt[14];
-
-    if (!g_vt_dp3) {
-        dp3_vt[0] = dp_QueryInterface;
-        dp3_vt[1] = dp_AddRef;
-        dp3_vt[2] = dp_Release;
-        dp3_vt[35] = dp_EnumConnections;
-        g_vt_dp3 = build_vtable(dp3_vt, 47);
-
-        lobby_vt[0] = dp_QueryInterface;
-        lobby_vt[1] = dp_AddRef;
-        lobby_vt[2] = dp_Release;
-    }
-    uint32_t vt = build_vtable(lobby_vt, 14);
-    uint32_t obj = new_object(vt, KIND_DPLAY, 0);
+    dplay_build_vtables();
+    uint32_t obj = new_object(build_vtable(g_lobby_vt, 14), KIND_DPLAY, 0);
     fprintf(stderr, "[dplay] DirectPlayLobbyCreateA -> object 0x%08X\n", obj);
     return obj;
 }

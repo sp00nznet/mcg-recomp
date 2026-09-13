@@ -145,6 +145,42 @@ range.
 - DirectPlay reports no network providers (EnumConnections returns DP_OK without
   invoking the callback), which is true here.
 
+### Decode hazards the driver now handles (all found by running, not reading)
+- **Embedded switch tables.** MSVC puts a dense switch table in `.text`, usually
+  right after the code using it. Decoded linearly those dwords become nonsense
+  AND the decode goes out of phase, so every later instruction lands at the
+  wrong address -- `MasterComponent::initEXCEL` computed-jumped to a label that
+  no longer existed. `_switch_tables()` finds `jmp [reg*4 + disp]` with disp
+  inside the function, walks entries while they stay in range, skips those bytes
+  and adds the case targets as labels.
+- **Data-sweep entries must be instruction boundaries.** A run of dwords is
+  strong evidence of a pointer table, not proof. `0x00646F6D` got in that way --
+  four bytes into a five-byte `push` -- and truncated `HeapManager::destroy` to
+  its first branch. `is_boundary()` decodes forward from the entry that already
+  covers a candidate and rejects it unless an instruction starts exactly there.
+  9 candidates are rejected on this binary.
+- **Stale generated files.** The chunk count moves with the function count, so a
+  leftover `recomp_00NN.c` from a longer run still gets globbed, and every
+  function in it then defines twice at link time. run_pipeline.py clears its own
+  output first.
+
+### Shim traps paid for so far
+- **Test your own handle tag FIRST.** `map_hkey` checked `v >= 0x80000000` for
+  predefined roots before its own tag, and `H_KEY_TAG` (0xF4E70000) is above
+  that -- so every HKEY the table handed out was cast to a pointer and passed to
+  the real registry API. Only shows up at the second level of key opening, where
+  the parent is one of ours rather than a root.
+- `waveOutGetNumDevs` returning 0 was honest until DirectSound became real; the
+  engine treats zero wave devices as fatal ("No Digital Sound Hardware
+  Installed"). It reports 1 now.
+- SessionManager reaches DirectPlay through
+  **CoCreateInstance(CLSID_DirectPlay, IID_IDirectPlay3A)**, not
+  DirectPlayLobbyCreateA. S_OK is 0, so the stub "succeeded" with an out pointer
+  it never wrote.
+- `IDirectPlayLobby::GetConnectionSettings` (slot 8) must return
+  **DPERR_NOTLOBBIED (0x8877042E)** -- WasLaunchedFromLobby tests for exactly
+  that code to conclude the game was started normally.
+
 ### Lifted-CRT self-test (reach for this first)
 `build-trace/mcg_recomp.exe MCX.EXE --selftest` calls the lifted CRT string
 routines with known inputs and compares against the host's answers. When the
@@ -183,10 +219,18 @@ run. Add a case whenever a primitive is suspected: it is cheap, and it converts
   run_pipeline.py is for.
 
 ### Current bring-up stop
-**`CreateWindowExA`**, which is still a stub, so it hands back no window and the
-engine exits cleanly. CRT startup, all 30 static constructors, the config parse,
-the media check and window-class registration all complete first. The Win32
-window + DirectX 6 HAL is Phase 4 and is the next real work.
+**`lObject::draw`** (`lport.obj`, 0x00710D80 +0x7c) makes a C++ virtual call
+`call [eax + 0xd4]` where the vtable pointer read from the object is
+`0x1010FFFF` -- garbage -- and a nearby register holds `0x1E1E1E1E`, a fill
+pattern. So a logistics UI object is being drawn before anything constructed it.
+That is the logistics/menu layer, i.e. the last thing between here and a menu.
+
+Everything before it now completes: CRT startup, all static constructors, the
+config parse, the media check, window creation, the full DirectDraw init
+sequence (a frame composites), DirectSound, DirectPlay via COM, and the
+registry. **Ruled out as the cause:** the "No Digital Sound Hardware Installed"
+path -- `waveOutGetNumDevs` reports 1 now and the message is gone, but the fault
+is unchanged.
 
 **The media check, for reference.** `checkForCDInDrive()` (0x00758DA0,
 `HonorB.obj`) walks A: to Z: for a `DRIVE_CDROM`, then looks for

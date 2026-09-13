@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.join(_pc, 'lift'))
 from pe_analyze import analyze_pe, build_iat_map            # noqa: E402
 from lift32 import Lifter, FUNCTION_LOCALS                   # noqa: E402
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32             # noqa: E402
-from capstone.x86 import X86_OP_IMM                          # noqa: E402
+from capstone.x86 import X86_OP_IMM, X86_OP_MEM      # noqa: E402
 
 COND_JUMPS = {'je', 'jne', 'jz', 'jnz', 'ja', 'jae', 'jb', 'jbe', 'jg', 'jge',
               'jl', 'jle', 'js', 'jns', 'jo', 'jno', 'jp', 'jnp', 'jcxz',
@@ -145,21 +145,75 @@ class LinearInstruction:
         return None
 
 
+def _switch_tables(md, code_data, code_start, lo, hi):
+    """Find jump tables embedded in this function's own bytes.
+
+    MSVC compiles a dense switch into `jmp dword ptr [reg*4 + table]` with the
+    table sitting in .text, usually right after the code that uses it. Decoded
+    linearly those dwords become nonsense instructions, and -- far worse -- the
+    decode goes out of phase, so every real instruction after the table lands at
+    the wrong address. `MasterComponent::initEXCEL` fails that way: its computed
+    jump targets an address that no longer has a label, because the label ended
+    up mid-instruction.
+
+    Returns {table_start: end} plus the case targets, which are real branch
+    destinations and need labels.
+    """
+    tables, targets = {}, set()
+    for insn in md.disasm(code_data[lo - code_start:hi - code_start], lo):
+        if insn.mnemonic != 'jmp' or not insn.operands:
+            continue
+        op = insn.operands[0]
+        if op.type != X86_OP_MEM or op.mem.scale != 4 or op.mem.index == 0:
+            continue
+        start = op.mem.disp & 0xFFFFFFFF
+        if not (lo <= start < hi):
+            continue
+        # Entries run until one stops being an address inside this function.
+        end = start
+        while end + 4 <= hi:
+            word = struct.unpack_from('<I', code_data, end - code_start)[0]
+            if not (lo <= word < hi):
+                break
+            targets.add(word)
+            end += 4
+        if end > start:
+            tables[start] = end
+    return tables, targets
+
+
 def linear_disassemble(md, code_data, code_start, lo, hi):
     offset = lo - code_start
     size = hi - lo
     if offset < 0 or offset + size > len(code_data):
         return [], set()
+
+    tables, targets = _switch_tables(md, code_data, code_start, lo, hi)
     insns, leaders = [], {lo}
-    for insn in md.disasm(code_data[offset:offset + size], lo):
-        li = LinearInstruction(insn)
-        insns.append(li)
-        if li.is_jump:
-            t = li.get_branch_target()
-            if t and lo <= t < hi:
-                leaders.add(t)
-            leaders.add(li.end_address)
-        if li.mnemonic == 'int3':
+    leaders |= targets
+
+    pos = lo
+    while pos < hi:
+        if pos in tables:                 # skip the table's bytes, not decode them
+            pos = tables[pos]
+            continue
+        # Decode up to the next table (or the end), so a table never gets
+        # swallowed as the tail of an instruction.
+        stop = min([t for t in tables if t > pos] + [hi])
+        advanced = False
+        for insn in md.disasm(code_data[pos - code_start:stop - code_start], pos):
+            li = LinearInstruction(insn)
+            insns.append(li)
+            advanced = True
+            pos = li.end_address
+            if li.is_jump:
+                t = li.get_branch_target()
+                if t and lo <= t < hi:
+                    leaders.add(t)
+                leaders.add(li.end_address)
+            if li.mnemonic == 'int3':
+                return insns, leaders
+        if not advanced:                  # undecodable byte: give up on the rest
             break
     return insns, leaders
 
@@ -285,6 +339,12 @@ def main():
     out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(_here, 'src', 'recomp', 'gen')
     split = int(sys.argv[3]) if len(sys.argv) > 3 else 500
     os.makedirs(out, exist_ok=True)
+    # Clear previous output first. The file count moves with the function count,
+    # and a leftover chunk from a longer run still gets globbed by CMake -- which
+    # shows up as every function in it being defined twice at link time.
+    for fn in os.listdir(out):
+        if re.fullmatch(r'recomp_\d+\.c', fn):
+            os.remove(os.path.join(out, fn))
 
     print('=== MechCommander Gold static recompilation (Phase 1) ===', flush=True)
     info = analyze_pe(exe)
@@ -365,10 +425,38 @@ def main():
             run = []
         if len({w for w in run if w}) >= 2:
             data_ptrs.update(w for w in run if w)
-    new_from_data = data_ptrs - set(known)
+    # A candidate must be a real instruction boundary. A run of dwords is
+    # strong evidence of a pointer table but not proof, and one false entry is
+    # expensive: it truncates whatever function contains it, so the real body
+    # ends mid-flow and a garbage "function" starts inside an instruction.
+    # 0x00646F6D got in this way -- four bytes into a five-byte `push` -- and
+    # chopped HeapManager::destroy down to its first branch.
+    #
+    # Decoding forward from the entry that already covers the candidate settles
+    # it: either an instruction starts exactly there, or nothing does.
+    def is_boundary(va):
+        prev = [k for k in known if k <= va]
+        if not prev:
+            return False
+        start = max(prev)
+        if start == va:
+            return True
+        limit = min(va + 16, ce)
+        for insn in md.disasm(code_data[start - cs:limit - cs], start):
+            if insn.address == va:
+                return True
+            if insn.address > va:
+                return False
+        return False
+
+    new_from_data = {va for va in data_ptrs - set(known) if is_boundary(va)}
+    rejected = len(data_ptrs - set(known)) - len(new_from_data)
     for va in new_from_data:
         known[va] = synth(va)
     from_data = len(new_from_data)
+    if rejected:
+        print(f'[*]   data sweep: {from_data} entries, {rejected} rejected as '
+              f'not instruction boundaries', flush=True)
 
     # Only `call` targets seed discovery. A jump target is not reliably a
     # function entry -- an intra-function branch and a tail call look identical

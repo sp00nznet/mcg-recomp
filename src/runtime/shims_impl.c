@@ -818,7 +818,50 @@ void imp_GetSystemTimeAsFileTime(void) {
  * claim the device exists and leave the caller's out pointer uninitialised.
  * ============================================================ */
 
-void imp_waveOutGetNumDevs(void) { RET(0); STDRET(0); }   /* 0 devices: honest */
+/* One device. This was 0 while there was genuinely nothing behind it, but the
+ * DirectSound mock is a real (silent) output now, and the engine treats zero
+ * wave devices as a hard failure -- "No Digital Sound Hardware Installed" --
+ * which leaves its sound objects unconstructed and the logistics UI drawing
+ * through a vtable pointer that was never written. */
+void imp_waveOutGetNumDevs(void) { RET(1); STDRET(0); }
+
+/* ============================================================
+ * COM creation
+ *
+ * SessionManager::CreateDirectPlayInterface does not call
+ * DirectPlayLobbyCreateA at all -- it asks COM for
+ * CoCreateInstance(CLSID_DirectPlay, IID_IDirectPlay3A) and stores the result
+ * at this+0x13C. S_OK is zero, so the stub "succeeded" while leaving that
+ * member null, and the engine's own Assert said exactly that one instruction
+ * before dereferencing it.
+ *
+ * REGDB_E_CLASSNOTREG is a path the engine already handles (it tests for that
+ * specific code), so an unknown class gets the honest answer rather than a
+ * plausible one.
+ * ============================================================ */
+
+static const uint8_t CLSID_DIRECTPLAY[16] = {
+    0x20, 0x6D, 0xEB, 0xD1, 0x23, 0x89, 0xD0, 0x11,
+    0x9D, 0x97, 0x00, 0xA0, 0xC9, 0x0A, 0x43, 0xCB,
+};
+
+void imp_CoInitialize(void)   { RET(0); STDRET(1); }
+void imp_CoUninitialize(void) { STDRET(0); }
+
+void imp_CoCreateInstance(void) {
+    uint32_t clsid = ARG(0), ppv = ARG(4);
+    if (ppv) MEM32(ppv) = 0;          /* never leave the out param stale */
+    if (clsid && !memcmp((const void*)ADDR(clsid), CLSID_DIRECTPLAY, 16)) {
+        uint32_t obj = dplay_create();
+        if (ppv) MEM32(ppv) = obj;
+        RET(obj ? 0u : 0x8007000Eu);
+    } else {
+        fprintf(stderr, "[com] CoCreateInstance {%08X...} not registered\n",
+                clsid ? MEM32(clsid) : 0);
+        RET(0x80040154u);             /* REGDB_E_CLASSNOTREG */
+    }
+    STDRET(5);
+}
 
 /* DPLAYX ordinal 4. Five arguments, per the decoration on the game's own
  * import thunk (_DirectPlayLobbyCreateA@20). */
@@ -1339,11 +1382,20 @@ void imp_GetSystemPaletteEntries(void) { RET(GetSystemPaletteEntries(HDC_OF(ARG(
 #define H_KEY_TAG  0xF4E70000u
 static HKEY g_keys[H_MAX];
 
+/* Our own tag is tested FIRST. The predefined roots are 0x8000000x, and the
+ * tag is above that too, so an "is it predefined?" test written as
+ * `v >= 0x80000000` swallows every handle this table hands out -- which then
+ * gets cast straight to a pointer and passed to the real registry API. That
+ * only shows up on the second level of key opening, where the parent is one of
+ * ours rather than a root. */
 static HKEY map_hkey(uint32_t v) {
-    if (v >= 0x80000000u) return (HKEY)(ULONG_PTR)v;       /* predefined root */
-    if ((v & H_TAG_MASK) != H_KEY_TAG) return NULL;
-    uint32_t i = v & 0xFFFFu;
-    return i < H_MAX ? g_keys[i] : NULL;
+    if ((v & H_TAG_MASK) == H_KEY_TAG) {
+        uint32_t i = v & 0xFFFFu;
+        return i < H_MAX ? g_keys[i] : NULL;
+    }
+    if (v >= 0x80000000u && v <= 0x8000000Fu)
+        return (HKEY)(ULONG_PTR)v;                          /* predefined root */
+    return NULL;
 }
 
 static uint32_t put_hkey(HKEY h) {
