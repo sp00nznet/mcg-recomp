@@ -109,14 +109,19 @@ static surface_t* surf_of(uint32_t obj) {
 /*
  * The surface the engine is drawing into RIGHT NOW.
  *
- * Mission::run re-enters aSystem::resetDirectDraw, which builds a whole new
- * primary and back buffer every time; the old ones are released but stay in
- * this table. Taking the FIRST primary meant the window kept showing a buffer
- * nothing had drawn into since the first reset -- which read as "the engine
- * stopped rendering" and sent a long hunt after a widget composite that was
- * landing correctly in a surface nobody was looking at. Search backwards.
+ * The intro-movie sequence re-enters aSystem::resetDirectDraw, which builds a
+ * whole new primary and back buffer each time; the old ones are released but
+ * stay in this table, so "which surface" is a real question with several wrong
+ * answers. Guessing by position gets it wrong in both directions -- the first
+ * primary goes stale after a reset, and the newest one is the one the engine
+ * abandoned. The engine says which it means every frame by Lock()ing it, so
+ * take that and only fall back to a guess before the first lock.
  */
+static int g_last_locked = -1;
+
 static surface_t* current_backbuffer(void) {
+    if (g_last_locked >= 0 && (uint32_t)g_last_locked < g_surf_n)
+        return &g_surf[g_last_locked];
     for (uint32_t i = g_surf_n; i-- > 0;)
         if (g_surf[i].is_primary)
             return g_surf[i].back >= 0 ? &g_surf[g_surf[i].back] : &g_surf[i];
@@ -225,6 +230,19 @@ static void present(surface_t* s) {
             want = s ? strtol(s, NULL, 0) : -1;
         }
         if (want >= 0 && ++seen == want) {
+          /* Which surface is the engine ACTUALLY drawing into? After a couple
+           * of resets there are several, and picking the wrong one shows an
+           * empty screen that looks exactly like "the engine stopped". */
+          for (uint32_t i = 0; i < g_surf_n; i++) {
+              const uint8_t* p = (const uint8_t*)ADDR(g_surf[i].bits);
+              size_t n = 0;
+              for (uint32_t k = 0; k < g_surf[i].pitch * g_surf[i].height; k++)
+                  if (p[k]) n++;
+              fprintf(stderr, "[ddraw]   surf %u bits=%08X %ux%u %s back=%d "
+                      "%zu non-zero%s\n", i, g_surf[i].bits, g_surf[i].width,
+                      g_surf[i].height, g_surf[i].is_primary ? "PRIMARY" : "off",
+                      g_surf[i].back, n, &g_surf[i] == s ? "   <- presented" : "");
+          }
           /* Both candidate framebuffers: the DirectDraw surface and the
            * CreateDIBSection the engine made for its own GDI blit. */
           for (int which = 0; which < 2; which++) {
@@ -265,6 +283,33 @@ static void present(surface_t* s) {
           }
         }
     }
+
+    /* MCG_PRESENT_TEST=1 paints a flat colour instead of the frame. If the
+     * window does not turn that colour, this blit is not what is on screen --
+     * which is a different bug from "the engine drew nothing". */
+    { static int test = -1;
+      if (test < 0) { const char* e = getenv("MCG_PRESENT_TEST"); test = e && *e != '0'; }
+      if (test)
+          for (size_t i = 0; i < (size_t)s->width * s->height; i++)
+              g_dib_px[i] = 0x00FF0000u;
+    }
+
+    /* What this call is about to put on the window, counted at the last
+     * possible moment: everything upstream can look empty and still be the
+     * wrong thing to have looked at. */
+    { static unsigned n;
+      if (++n % 1000 == 0) {
+          size_t nz = 0, sz = 0;
+          for (size_t i = 0; i < (size_t)s->width * s->height; i++)
+              if (g_dib_px[i] & 0xFFFFFF) nz++;
+          for (uint32_t y = 0; y < s->height; y++)
+              for (uint32_t x = 0; x < s->width; x++)
+                  if (src[(size_t)y * s->pitch + x]) sz++;
+          fprintf(stderr, "[ddraw] present #%u from %08X: %zu src bytes, "
+                  "%zu/%u visible, engine screen %ux%u\n", n, s->bits, sz, nz,
+                  s->width * s->height,
+                  MEM32(0x007BBB74u) + 1, MEM32(0x007BBB78u) + 1);
+      } }
 
     HDC wdc = GetDC(g_hwnd);
     HGDIOBJ old = SelectObject(g_memdc, g_dib);
@@ -384,6 +429,7 @@ static void sf_Lock(void) {
     fill_desc(s, d);
     MEM32(d + SD_FLAGS) = MEM32(d + SD_FLAGS) | DDSD_LPSURFACE;
     MEM32(d + SD_SURFACE) = s->bits;           /* the engine draws straight here */
+    g_last_locked = (int)(s - g_surf);         /* ...so this is the live one */
     { static int shown; if (shown < 4) { shown++;
         fprintf(stderr, "[ddraw] Lock %ux%u pitch %u -> 0x%08X\n",
                 s->width, s->height, s->pitch, s->bits); } }

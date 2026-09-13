@@ -132,14 +132,14 @@ static uint32_t g_callstack_n;
  * the value changed rather than the instruction; a guard page would give the
  * instruction and can replace this if a call site is ever too coarse.
  */
-static uint32_t g_watch_va, g_watch_val;
-static int g_watch_armed;
+static uint32_t g_watch_va, g_watch_val, g_watch_off;
+static int g_watch_armed, g_watch_indirect;
 
 /* The arena is reserved but committed on demand, so the address is usually not
  * mapped yet when the watch is requested. VirtualQuery answers that without
  * touching it -- probing under SEH instead raised an exception per call, and
  * the crash handler is a vectored one, so it reported every single one. */
-static int watch_read(uint32_t va, uint32_t* out) {
+static int watch_mapped(uint32_t va, uint32_t* out) {
     MEMORY_BASIC_INFORMATION mbi;
     void* p = (void*)(uintptr_t)ADDR(va);
     if (!VirtualQuery(p, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT)
@@ -148,11 +148,30 @@ static int watch_read(uint32_t va, uint32_t* out) {
     return 1;
 }
 
+static int watch_read(uint32_t va, uint32_t* out) {
+    if (!g_watch_indirect)
+        return watch_mapped(va, out);
+    /* Indirect: the interesting field belongs to an object whose address is
+     * only known at runtime, so follow the pointer each time. */
+    uint32_t obj;
+    if (!watch_mapped(va, &obj) || !obj) return 0;
+    return watch_mapped(obj + g_watch_off, out);
+}
+
+/*
+ * MCG_WATCH=0xADDR watches that dword.
+ * MCG_WATCH=*0xADDR+0xOFF watches [[ADDR] + OFF] -- a field of an object the
+ * program allocates, which is the usual case once past startup. Mission::run's
+ * state machine, for instance, is `*0x8087A8+0`.
+ */
 static void watch_init(void) {
     const char* s = getenv("MCG_WATCH");
     if (!s) return;
-    g_watch_va = (uint32_t)strtoul(s, NULL, 0);
-    fprintf(stderr, "[watch] arming on %08X\n", g_watch_va);
+    if (*s == '*') { g_watch_indirect = 1; s++; }
+    g_watch_va = (uint32_t)strtoul(s, (char**)&s, 0);
+    if (*s == '+') g_watch_off = (uint32_t)strtoul(s + 1, NULL, 0);
+    fprintf(stderr, "[watch] arming on %s%08X+%X\n",
+            g_watch_indirect ? "*" : "", g_watch_va, g_watch_off);
 }
 
 static void watch_check(uint32_t site) {
@@ -303,10 +322,23 @@ static DWORD WINAPI watchdog(LPVOID unused) {
         uint32_t pc = g_cur_pc;
         same = (pc == last_pc) ? same + 1 : 0;
         last_pc = pc;
+        /*
+         * Mission::run is a jump table on this->state, and where it sits is
+         * the single most useful number during bring-up: state 10 plays the
+         * intro movies, 8 waits for one to finish, 3 is the logistics shell.
+         * `movie` is the index it is up to, `mode` the outer game mode at
+         * 0x808790, `play` aSystem's "a movie is running" flag.
+         */
+        uint32_t mission = MEM32(0x008087A8u), sys = MEM32(0x007AAE80u);
         fprintf(stderr, "[watchdog] func=0x%08X pc=0x%08X depth=%u "
-                "peek=%u dispatch=%u wndproc=%u%s\n",
+                "peek=%u dispatch=%u wndproc=%u | state=%d movie=%d mode=%d "
+                "play=%d%s\n",
                 g_cur_func, pc, g_callstack_n,
                 g_n_peek, g_n_dispatch, g_n_wndproc,
+                mission ? (int)MEM32(mission) : -1,
+                mission ? (int)MEM32(mission + 0x14) : -1,
+                (int)MEM32(0x00808790u),
+                sys ? (int)MEM32(sys + 0xAECu) : -1,
                 same ? "  (PC unchanged)" : "");
         if (same) {
             uint32_t n = g_callstack_n < CALLSTACK_MAX

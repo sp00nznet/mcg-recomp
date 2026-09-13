@@ -1303,7 +1303,76 @@ void imp_ShowCursor(void)    { RET((uint32_t)ShowCursor((BOOL)ARG(0))); STDRET(1
 void imp_SetCapture(void)    { RET(h_put(SetCapture(HWND_OF(ARG(0))))); STDRET(1); }
 void imp_ReleaseCapture(void){ RET(ReleaseCapture() ? 1 : 0); STDRET(0); }
 void imp_GetSystemMetrics(void) { RET((uint32_t)GetSystemMetrics((int)ARG(0))); STDRET(1); }
-void imp_GetAsyncKeyState(void) { RET((uint32_t)(uint16_t)GetAsyncKeyState((int)ARG(0))); STDRET(1); }
+/*
+ * Scripted input.
+ *
+ * MCG_CLICK="x,y@t;x,y@t;..." clicks engine point (x,y) t seconds after start.
+ *
+ * Driving the menus from outside does not work: the engine reads the pointer
+ * with GetCursorPos and the buttons with GetAsyncKeyState, and a posted
+ * WM_LBUTTONDOWN touches neither. Real synthetic input does, but only reaches
+ * the window when it is the foreground one, which a background process cannot
+ * reliably arrange -- every attempt landed on whatever was in front instead.
+ * Feeding the two functions the engine actually polls sidesteps the whole
+ * question, and makes the UI testable without a human at the keyboard.
+ *
+ * Coordinates are the engine's own screen, NOT the window's client, so they
+ * come straight back out of a widget dump.
+ */
+#define CLICK_HOLD_MS   220      /* button held this long */
+#define CLICK_HOVER_MS  600      /* pointer parked this long either side */
+
+static struct { int x, y; unsigned at_ms; } g_clicks[8];
+static int g_click_n = -1;
+static DWORD g_start_ms;
+
+static void clicks_init(void) {
+    const char* s = getenv("MCG_CLICK");
+    g_click_n = 0;
+    g_start_ms = GetTickCount();
+    if (!s) return;
+    while (*s && g_click_n < 8) {
+        int x, y; double t;
+        if (sscanf(s, "%d,%d@%lf", &x, &y, &t) != 3) break;
+        g_clicks[g_click_n].x = x;
+        g_clicks[g_click_n].y = y;
+        g_clicks[g_click_n].at_ms = (unsigned)(t * 1000.0);
+        fprintf(stderr, "[input] scripted click %d: (%d,%d) at %.1fs\n",
+                g_click_n, x, y, t);
+        g_click_n++;
+        s = strchr(s, ';');
+        if (!s) break;
+        s++;
+    }
+}
+
+/* 0 = nothing scripted now, 1 = pointer parked there, 2 = and button down. */
+static int click_now(int* x, int* y) {
+    if (g_click_n < 0) clicks_init();
+    unsigned now = GetTickCount() - g_start_ms;
+    for (int i = 0; i < g_click_n; i++) {
+        unsigned at = g_clicks[i].at_ms;
+        if (now + CLICK_HOVER_MS < at || now > at + CLICK_HOLD_MS + CLICK_HOVER_MS)
+            continue;
+        *x = g_clicks[i].x;
+        *y = g_clicks[i].y;
+        return (now >= at && now < at + CLICK_HOLD_MS) ? 2 : 1;
+    }
+    return 0;
+}
+
+void imp_GetAsyncKeyState(void) {
+    int x, y;
+    if ((int)ARG(0) == VK_LBUTTON && click_now(&x, &y) == 2) {
+        static int said;
+        if (!said) { said = 1; fprintf(stderr, "[input] left button down\n"); }
+        RET(0x8000u);
+        STDRET(1);
+        return;
+    }
+    RET((uint32_t)(uint16_t)GetAsyncKeyState((int)ARG(0)));
+    STDRET(1);
+}
 void imp_GetKeyState(void)   { RET((uint32_t)(uint16_t)GetKeyState((int)ARG(0))); STDRET(1); }
 void imp_GetCaretBlinkTime(void) { RET(GetCaretBlinkTime()); STDRET(0); }
 void imp_GetMessagePos(void) { RET(GetMessagePos()); STDRET(0); }
@@ -1320,8 +1389,15 @@ void imp_AdjustWindowRect(void) { RET(AdjustWindowRect((LPRECT)simp(ARG(0)), ARG
 void imp_ClientToScreen(void){ RET(ClientToScreen(HWND_OF(ARG(0)), (LPPOINT)simp(ARG(1))) ? 1 : 0); STDRET(2); }
 void imp_GetCursorPos(void) {
     POINT p = { 0, 0 };
-    BOOL ok = GetCursorPos(&p);
-    ddraw_map_cursor(&p);                 /* desktop -> the engine's screen */
+    BOOL ok = TRUE;
+    int sx, sy;
+    if (click_now(&sx, &sy)) {            /* scripted: already engine space */
+        p.x = sx;
+        p.y = sy;
+    } else {
+        ok = GetCursorPos(&p);
+        ddraw_map_cursor(&p);             /* desktop -> the engine's screen */
+    }
     { LPPOINT out = (LPPOINT)simp(ARG(0)); if (out) *out = p; }
     RET(ok ? 1 : 0);
     STDRET(1);
