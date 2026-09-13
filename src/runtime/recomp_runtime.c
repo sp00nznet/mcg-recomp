@@ -83,9 +83,26 @@ static int balance_first_time(uint32_t site) {
     return 1;
 }
 
+/* ebp is callee-saved: a call must hand it back unchanged. This fails
+ * differently from an esp drift and is worth its own check -- a zeroed ebp
+ * turns every `[ebp - n]` into a small absolute address, which faults a long
+ * way from whichever body actually lost it. */
+static void check_bp(uint32_t bp_before, uint32_t site, uint32_t target) {
+    if (g_ebp == bp_before || !balance_first_time(site))
+        return;
+    if (target)
+        fprintf(stderr, "[ebp-clobber] indirect call at 0x%08X -> 0x%08X: "
+                "ebp %08X -> %08X\n", site, target, bp_before, g_ebp);
+    else
+        fprintf(stderr, "[ebp-clobber] call at 0x%08X: ebp %08X -> %08X\n",
+                site, bp_before, g_ebp);
+}
+
 /* Indirect form: the callee's VA is known here, so the report names the
  * function rather than only the dispatch site it went through. */
-void recomp_check_balance2(uint32_t sp_before, uint32_t site, uint32_t target) {
+void recomp_check_balance2(uint32_t sp_before, uint32_t bp_before,
+                           uint32_t site, uint32_t target) {
+    check_bp(bp_before, site, target);
 #if RECOMP_RETADDR
     if ((g_ebx == RECOMP_RETADDR || g_esi == RECOMP_RETADDR ||
          g_edi == RECOMP_RETADDR || g_ebp == RECOMP_RETADDR)
@@ -102,7 +119,8 @@ void recomp_check_balance2(uint32_t sp_before, uint32_t site, uint32_t target) {
                         "esp %u bytes low\n", site, target, low);
 }
 
-void recomp_check_balance(uint32_t sp_before, uint32_t site) {
+void recomp_check_balance(uint32_t sp_before, uint32_t bp_before, uint32_t site) {
+    check_bp(bp_before, site, 0);
     /* The poison is the real prize. RECOMP_RETADDR is a value no program would
      * compute, so finding it in a register the callee was supposed to preserve
      * names the exact call that lost it -- which beats discovering it later as
@@ -315,9 +333,68 @@ static void mcg_initterm(void) {
     g_esp += 4;                  /* __cdecl: the caller cleans the arguments */
 }
 
+/*
+ * void __cdecl __fassign(int isDouble, char* dst, char* src)
+ *
+ * The CRT's string-to-float assignment, used by every scanf that reads a %f or
+ * %lf. It delegates to __atodbl/__atoflt, which go through _strgtold12 and the
+ * 12-byte internal long-double format -- a conversion the lifter's 64-bit
+ * model of the x87 stack cannot represent, and which came back leaving ebp
+ * zeroed, so the caller's next `[ebp - n]` read a small absolute address.
+ *
+ * strtod is the same conversion, exactly specified, and the host has one.
+ */
+static void mcg_fassign(void) {
+    uint32_t is_double = MEM32(g_esp + 4);
+    uint32_t dst = MEM32(g_esp + 8);
+    uint32_t src = MEM32(g_esp + 12);
+    double v = src ? strtod((const char*)ADDR(src), NULL) : 0.0;
+    if (dst) {
+        if (is_double) {
+            memcpy((void*)ADDR(dst), &v, sizeof v);
+        } else {
+            float f = (float)v;
+            memcpy((void*)ADDR(dst), &f, sizeof f);
+        }
+    }
+    g_esp += 4;                      /* __cdecl: the caller cleans up */
+}
+
+/*
+ * void __cdecl Assert(int condition, unsigned line, char* file, char* msg)
+ *
+ * The engine's own assertion. Overridden for two reasons: it reports what the
+ * engine thinks is wrong, in its own words, which is the most direct diagnostic
+ * available here; and the lifted body comes back with ebp changed, which then
+ * corrupts its caller's frame. A failed assert is printed and execution
+ * continues, matching the retail behaviour of a dialog the user dismisses.
+ */
+static void mcg_Assert(void) {
+    uint32_t cond = MEM32(g_esp + 4);
+    uint32_t line = MEM32(g_esp + 8);
+    uint32_t file = MEM32(g_esp + 12);
+    uint32_t msg = MEM32(g_esp + 16);
+    if (!cond) {
+        static uint32_t seen[32];
+        static uint32_t n;
+        uint32_t i = 0;
+        for (; i < n; i++)
+            if (seen[i] == line) break;
+        if (i == n && n < 32) {          /* once per assertion site */
+            seen[n++] = line;
+            fprintf(stderr, "[game:Assert] %s:%u  %s\n",
+                    file ? (const char*)ADDR(file) : "?", line,
+                    msg ? (const char*)ADDR(msg) : "");
+        }
+    }
+    g_esp += 4;                          /* __cdecl */
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     switch (va) {
+    case 0x00644250u: return mcg_Assert;       /* Assert    */
     case 0x00760D27u: return mcg_initterm;     /* _initterm */
+    case 0x00763EDAu: return mcg_fassign;      /* __fassign  */
     case 0x006440B0u: return mcg_GeneralMsg;   /* GeneralMsg(char*) */
     case 0x006440D0u: return mcg_FatalMsg;     /* FatalMsg(char*)   */
     case 0x00644180u: return mcg_Fatal;        /* Fatal(uint,char*,char*) */

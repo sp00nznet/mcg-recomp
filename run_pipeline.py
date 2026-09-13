@@ -56,15 +56,20 @@ def _balance(va):
     """
     def sub(m):
         indirect, target = m.group(1), m.group(2)
+        # ebp is callee-saved, so a call must give it back unchanged. It is
+        # checked alongside esp because the two fail differently: esp drifts
+        # when a `ret` is dropped, ebp when a body's push/pop pair does not
+        # survive its own lift -- and a zeroed ebp turns every frame-relative
+        # access into a small absolute address.
         if indirect:
             # Evaluate the target once into a temporary: it names the callee in
             # the report, which is what turns "something inside _initterm" into
             # the one static constructor that misbehaved.
-            return (f'{{ uint32_t _sp0 = g_esp, _tg = (uint32_t)({target}); '
-                    f'RECOMP_ICALL(_tg); '
-                    f'RECOMP_BALANCE2(_sp0, 0x{va:08X}u, _tg); }}')
-        return (f'{{ uint32_t _sp0 = g_esp; RECOMP_CALL({target}); '
-                f'RECOMP_BALANCE(_sp0, 0x{va:08X}u); }}')
+            return (f'{{ uint32_t _sp0 = g_esp, _bp0 = ebp, '
+                    f'_tg = (uint32_t)({target}); RECOMP_ICALL(_tg); '
+                    f'RECOMP_BALANCE2(_sp0, _bp0, 0x{va:08X}u, _tg); }}')
+        return (f'{{ uint32_t _sp0 = g_esp, _bp0 = ebp; RECOMP_CALL({target}); '
+                f'RECOMP_BALANCE(_sp0, _bp0, 0x{va:08X}u); }}')
     return sub
 
 
@@ -76,7 +81,9 @@ OVERRIDES = {
     0x006440B0: 'GeneralMsg(char*) -- print the message, skip the %f path',
     0x006440D0: 'FatalMsg(char*)   -- ditto; x87 80-bit formatting derails',
     0x00644180: 'Fatal(uint,char*,char*) -- report and stop',
+    0x00644250: 'Assert -- surface the engine diagnostic; the lift clobbers ebp',
     0x00760D27: '_initterm -- probe: every ctor must leave esp exactly as found',
+    0x00763EDA: '__fassign -- strtod natively; the long double path zeroed ebp',
 }
 
 
@@ -252,17 +259,18 @@ def write_chunk(out, idx, chunk):
         # Compiles to nothing otherwise.
         f.write('#ifdef RECOMP_TRACE\n'
                 'extern uint32_t g_cur_pc;\n'
-                'void recomp_check_balance(uint32_t sp_before, uint32_t site);\n'
-                'void recomp_check_balance2(uint32_t sp_before, uint32_t site,\n'
-                '                           uint32_t target);\n'
+                'void recomp_check_balance(uint32_t sp, uint32_t bp, uint32_t site);\n'
+                'void recomp_check_balance2(uint32_t sp, uint32_t bp,\n'
+                '                           uint32_t site, uint32_t target);\n'
                 '#define RECOMP_PC(va) (g_cur_pc = (va))\n'
-                '#define RECOMP_BALANCE(sp, site) recomp_check_balance((sp), (site))\n'
-                '#define RECOMP_BALANCE2(sp, site, tgt) '
-                'recomp_check_balance2((sp), (site), (tgt))\n'
+                '#define RECOMP_BALANCE(sp, bp, site) '
+                'recomp_check_balance((sp), (bp), (site))\n'
+                '#define RECOMP_BALANCE2(sp, bp, site, tgt) '
+                'recomp_check_balance2((sp), (bp), (site), (tgt))\n'
                 '#else\n'
                 '#define RECOMP_PC(va) ((void)0)\n'
-                '#define RECOMP_BALANCE(sp, site) ((void)0)\n'
-                '#define RECOMP_BALANCE2(sp, site, tgt) ((void)0)\n'
+                '#define RECOMP_BALANCE(sp, bp, site) ((void)0)\n'
+                '#define RECOMP_BALANCE2(sp, bp, site, tgt) ((void)0)\n'
                 '#endif\n\n')
         for code, entry, name in chunk:
             sig = entry.get('demangled') or entry['name']

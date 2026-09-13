@@ -919,6 +919,392 @@ void imp_GetDriveTypeA(void) {
 }
 
 /* ============================================================
+ * Host objects behind 32-bit handles
+ *
+ * HWND, HDC and the GDI objects are all host pointers, which are 64 bits here
+ * and a 32-bit slot over there. They live in one table, and h_put is
+ * deduplicating: the game compares handles for equality, so the same host
+ * pointer has to come back as the same 32-bit value every time.
+ *
+ * The range sits well above every simulated region (image, stack, arena and the
+ * runtime-export VAs all end below 0x11000000), so a handle used as a pointer
+ * by mistake faults instead of landing in real memory.
+ * ============================================================ */
+
+#define H_OBJ_BASE  0x40000000u
+#define H_OBJ_MAX   4096
+
+static void* g_objs[H_OBJ_MAX];
+static uint32_t g_obj_n = 1;
+
+static uint32_t h_put(void* p) {
+    if (!p) return 0;
+    for (uint32_t i = 1; i < g_obj_n; i++)
+        if (g_objs[i] == p) return H_OBJ_BASE + i * 4;
+    if (g_obj_n >= H_OBJ_MAX) return 0;
+    g_objs[g_obj_n] = p;
+    return H_OBJ_BASE + (g_obj_n++) * 4;
+}
+
+static void* h_ptr(uint32_t v) {
+    if (v < H_OBJ_BASE) return NULL;
+    uint32_t i = (v - H_OBJ_BASE) / 4;
+    return (i && i < g_obj_n) ? g_objs[i] : NULL;
+}
+
+#define HWND_OF(v)  ((HWND)h_ptr(v))
+#define HDC_OF(v)   ((HDC)h_ptr(v))
+
+/* A simulated pointer used directly as a host one. Simulated memory IS host
+ * memory at a fixed base, so strings and structs need no copy -- only null has
+ * to survive the trip. */
+static void* simp(uint32_t va) { return va ? (void*)ADDR(va) : NULL; }
+
+/* ============================================================
+ * Calling back INTO lifted code
+ *
+ * A window procedure is the one place the calling convention is dictated by
+ * Windows rather than by the game's compiler, so restore esp afterwards instead
+ * of trusting the callee's epilogue -- that way it works for a stdcall or a
+ * cdecl body. Re-entrancy is expected: this runs while lifted code is already
+ * inside its own message pump, and the new frame just sits below it.
+ * ============================================================ */
+
+static uint32_t call_lifted(uint32_t va, int argc, const uint32_t* argv) {
+    recomp_func_t f = recomp_lookup_manual(va);
+    if (!f) f = recomp_lookup(va);
+    if (!f) {
+        fprintf(stderr, "[shims] callback into unlifted VA 0x%08X\n", va);
+        return 0;
+    }
+    uint32_t saved = g_esp;
+    for (int i = argc - 1; i >= 0; i--)
+        PUSH32(g_esp, argv[i]);
+    PUSH32(g_esp, RECOMP_RETADDR);
+    f();
+    g_esp = saved;
+    return g_eax;
+}
+
+/* ============================================================
+ * Window classes, windows and the message pump
+ * ============================================================ */
+
+/* WNDCLASSA, 32-bit: 40 bytes, all fields pointer-or-int wide. */
+#define WC_STYLE 0x00
+#define WC_PROC  0x04
+#define WC_CLSX  0x08
+#define WC_WNDX  0x0C
+#define WC_INST  0x10
+#define WC_ICON  0x14
+#define WC_CURS  0x18
+#define WC_BRUSH 0x1C
+#define WC_MENU  0x20
+#define WC_NAME  0x24
+
+#define MAX_CLASSES 32
+static struct { ATOM atom; uint32_t proc; } g_classes[MAX_CLASSES];
+static uint32_t g_class_n;
+
+static uint32_t class_proc(ATOM a) {
+    for (uint32_t i = 0; i < g_class_n; i++)
+        if (g_classes[i].atom == a) return g_classes[i].proc;
+    return 0;
+}
+
+/* A pointer lParam cannot survive the 32-bit round trip: WM_NCCREATE carries a
+ * host CREATESTRUCT*, and the game hands it straight back to DefWindowProcA,
+ * which would dereference a truncated half. So remember the real lParam for the
+ * message in flight and give it back on the way out.
+ *
+ * ponytail: pass-through only. If the engine ever *reads* a pointer lParam it
+ * faults on the truncated address rather than reading something plausible,
+ * which is the failure worth having -- marshal that message's struct then. */
+typedef struct { HWND hwnd; UINT msg; LPARAM lp; } cur_msg_t;
+static cur_msg_t g_cur_msg;
+
+static LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    uint32_t proc = class_proc((ATOM)GetClassLongPtrA(hwnd, GCW_ATOM));
+    if (!proc) return DefWindowProcA(hwnd, msg, wp, lp);
+    cur_msg_t outer = g_cur_msg;            /* nested dispatches nest correctly */
+    g_cur_msg.hwnd = hwnd;
+    g_cur_msg.msg = msg;
+    g_cur_msg.lp = lp;
+    /* h_put, not h_ptr: WM_NCCREATE arrives before CreateWindowExA has
+     * returned, so this is where the window first gets a 32-bit identity. */
+    uint32_t args[4] = { h_put(hwnd), msg, (uint32_t)wp, (uint32_t)lp };
+    uint32_t r = call_lifted(proc, 4, args);
+    g_cur_msg = outer;
+    return (LRESULT)(LONG_PTR)(int32_t)r;
+}
+
+void imp_RegisterClassA(void) {
+    uint32_t wc = ARG(0);
+    if (!wc || g_class_n >= MAX_CLASSES) { RET(0); STDRET(1); return; }
+    WNDCLASSA c;
+    memset(&c, 0, sizeof c);
+    c.style         = MEM32(wc + WC_STYLE);
+    c.lpfnWndProc   = host_wndproc;
+    c.cbClsExtra    = (int)MEM32(wc + WC_CLSX);
+    c.cbWndExtra    = (int)MEM32(wc + WC_WNDX);
+    c.hInstance     = GetModuleHandleA(NULL);
+    c.hIcon         = (HICON)h_ptr(MEM32(wc + WC_ICON));
+    c.hCursor       = (HCURSOR)h_ptr(MEM32(wc + WC_CURS));
+    c.hbrBackground = (HBRUSH)h_ptr(MEM32(wc + WC_BRUSH));
+    c.lpszMenuName  = (LPCSTR)simp(MEM32(wc + WC_MENU));
+    c.lpszClassName = (LPCSTR)simp(MEM32(wc + WC_NAME));
+    if (!c.hCursor) c.hCursor = LoadCursorA(NULL, IDC_ARROW);
+    ATOM a = RegisterClassA(&c);
+    if (!a) {
+        g_last_error = GetLastError();
+        fprintf(stderr, "[win] RegisterClassA failed (%u)\n", g_last_error);
+        RET(0);
+        STDRET(1);
+        return;
+    }
+    g_classes[g_class_n].atom = a;
+    g_classes[g_class_n].proc = MEM32(wc + WC_PROC);
+    fprintf(stderr, "[win] RegisterClassA(\"%s\") wndproc=0x%08X\n",
+            c.lpszClassName ? c.lpszClassName : "?", g_classes[g_class_n].proc);
+    g_class_n++;
+    RET(a);
+    STDRET(1);
+}
+
+void imp_CreateWindowExA(void) {
+    /* hMenu and lpParam pass as NULL: a menu would be a simulated handle with
+     * no host object behind it, and lpParam only reaches the game again inside
+     * a CREATESTRUCT full of host pointers, which is worse than not offering
+     * it. ponytail: marshal a CREATESTRUCT if one is ever actually read. */
+    HWND h = CreateWindowExA(ARG(0), (LPCSTR)simp(ARG(1)), (LPCSTR)simp(ARG(2)),
+                             ARG(3), (int)ARG(4), (int)ARG(5),
+                             (int)ARG(6), (int)ARG(7),
+                             HWND_OF(ARG(8)), NULL, GetModuleHandleA(NULL), NULL);
+    fprintf(stderr, "[win] CreateWindowExA(\"%s\" style=%08X %dx%d) -> %p\n",
+            (const char*)simp(ARG(1)), ARG(3), (int)ARG(6), (int)ARG(7), (void*)h);
+    if (!h) {
+        g_last_error = GetLastError();
+        fprintf(stderr, "[win] CreateWindowExA failed (%u)\n", g_last_error);
+    }
+    RET(h ? h_put(h) : 0);
+    STDRET(12);
+}
+
+void imp_DefWindowProcA(void) {
+    HWND h = HWND_OF(ARG(0));
+    UINT m = ARG(1);
+    /* Same window and message as the one in flight: this is the ordinary
+     * "not mine, you take it" hand-back, so give the real lParam rather than
+     * the truncated copy the game is holding. */
+    LPARAM lp = (h == g_cur_msg.hwnd && m == g_cur_msg.msg)
+                    ? g_cur_msg.lp : (LPARAM)(int32_t)ARG(3);
+    RET((uint32_t)(LONG_PTR)DefWindowProcA(h, m, (WPARAM)ARG(2), lp));
+    STDRET(4);
+}
+
+void imp_DestroyWindow(void) { RET(DestroyWindow(HWND_OF(ARG(0))) ? 1 : 0); STDRET(1); }
+void imp_ShowWindow(void)    { RET(ShowWindow(HWND_OF(ARG(0)), (int)ARG(1)) ? 1 : 0); STDRET(2); }
+void imp_SetFocus(void)      { RET(h_put(SetFocus(HWND_OF(ARG(0))))); STDRET(1); }
+void imp_SetForegroundWindow(void) { RET(SetForegroundWindow(HWND_OF(ARG(0))) ? 1 : 0); STDRET(1); }
+void imp_EnableWindow(void)  { RET(EnableWindow(HWND_OF(ARG(0)), (BOOL)ARG(1)) ? 1 : 0); STDRET(2); }
+void imp_SetWindowTextA(void){ RET(SetWindowTextA(HWND_OF(ARG(0)), (LPCSTR)simp(ARG(1))) ? 1 : 0); STDRET(2); }
+void imp_PostQuitMessage(void) { PostQuitMessage((int)ARG(0)); STDRET(1); }
+void imp_MessageBeep(void)   { RET(MessageBeep(ARG(0)) ? 1 : 0); STDRET(1); }
+void imp_ShowCursor(void)    { RET((uint32_t)ShowCursor((BOOL)ARG(0))); STDRET(1); }
+void imp_SetCursorPos(void)  { RET(SetCursorPos((int)ARG(0), (int)ARG(1)) ? 1 : 0); STDRET(2); }
+void imp_SetCapture(void)    { RET(h_put(SetCapture(HWND_OF(ARG(0))))); STDRET(1); }
+void imp_ReleaseCapture(void){ RET(ReleaseCapture() ? 1 : 0); STDRET(0); }
+void imp_GetSystemMetrics(void) { RET((uint32_t)GetSystemMetrics((int)ARG(0))); STDRET(1); }
+void imp_GetAsyncKeyState(void) { RET((uint32_t)(uint16_t)GetAsyncKeyState((int)ARG(0))); STDRET(1); }
+void imp_GetKeyState(void)   { RET((uint32_t)(uint16_t)GetKeyState((int)ARG(0))); STDRET(1); }
+void imp_GetCaretBlinkTime(void) { RET(GetCaretBlinkTime()); STDRET(0); }
+void imp_GetMessagePos(void) { RET(GetMessagePos()); STDRET(0); }
+void imp_RegisterWindowMessageA(void) { RET(RegisterWindowMessageA((LPCSTR)simp(ARG(0)))); STDRET(1); }
+void imp_FindWindowA(void)   { RET(h_put(FindWindowA((LPCSTR)simp(ARG(0)), (LPCSTR)simp(ARG(1))))); STDRET(2); }
+void imp_PostMessageA(void)  { RET(PostMessageA(HWND_OF(ARG(0)), ARG(1), (WPARAM)ARG(2), (LPARAM)(int32_t)ARG(3)) ? 1 : 0); STDRET(4); }
+void imp_WaitMessage(void)   { RET(WaitMessage() ? 1 : 0); STDRET(0); }
+
+/* RECT and POINT are fixed-width all through, so they pass straight across. */
+void imp_SetRect(void)       { RET(SetRect((LPRECT)simp(ARG(0)), (int)ARG(1), (int)ARG(2), (int)ARG(3), (int)ARG(4)) ? 1 : 0); STDRET(5); }
+void imp_PtInRect(void)      { POINT p = { (LONG)ARG(1), (LONG)ARG(2) }; RET(PtInRect((const RECT*)simp(ARG(0)), p) ? 1 : 0); STDRET(3); }
+void imp_IntersectRect(void) { RET(IntersectRect((LPRECT)simp(ARG(0)), (const RECT*)simp(ARG(1)), (const RECT*)simp(ARG(2))) ? 1 : 0); STDRET(3); }
+void imp_AdjustWindowRect(void) { RET(AdjustWindowRect((LPRECT)simp(ARG(0)), ARG(1), (BOOL)ARG(2)) ? 1 : 0); STDRET(3); }
+void imp_ClientToScreen(void){ RET(ClientToScreen(HWND_OF(ARG(0)), (LPPOINT)simp(ARG(1))) ? 1 : 0); STDRET(2); }
+void imp_GetCursorPos(void)  { RET(GetCursorPos((LPPOINT)simp(ARG(0))) ? 1 : 0); STDRET(1); }
+void imp_ClipCursor(void)    { RET(ClipCursor((const RECT*)simp(ARG(0))) ? 1 : 0); STDRET(1); }
+void imp_MapWindowPoints(void) { RET((uint32_t)MapWindowPoints(HWND_OF(ARG(0)), HWND_OF(ARG(1)), (LPPOINT)simp(ARG(2)), ARG(3))); STDRET(4); }
+void imp_InvalidateRect(void) { RET(InvalidateRect(HWND_OF(ARG(0)), (const RECT*)simp(ARG(1)), (BOOL)ARG(2)) ? 1 : 0); STDRET(3); }
+
+void imp_SetWindowPos(void) {
+    RET(SetWindowPos(HWND_OF(ARG(0)), HWND_OF(ARG(1)), (int)ARG(2), (int)ARG(3),
+                     (int)ARG(4), (int)ARG(5), ARG(6)) ? 1 : 0);
+    STDRET(7);
+}
+
+void imp_SetWindowLongA(void) {
+    /* GWL_WNDPROC would hand out a host function pointer; nothing else here is
+     * translated, so pass the rest through and refuse that one loudly. */
+    /* -4 is GWL_WNDPROC. Spelled numerically because the 64-bit headers only
+     * define GWLP_WNDPROC, while the value the 32-bit game passes is -4. */
+    if ((int)ARG(1) == -4) {
+        fprintf(stderr, "[win] SetWindowLongA(GWL_WNDPROC) not supported\n");
+        RET(0);
+    } else {
+        RET((uint32_t)SetWindowLongA(HWND_OF(ARG(0)), (int)ARG(1), (LONG)ARG(2)));
+    }
+    STDRET(3);
+}
+
+/* MSG, 32-bit: 28 bytes. hwnd is the only field that needs translating. */
+#define MSG_HWND 0
+#define MSG_MSG  4
+#define MSG_WP   8
+#define MSG_LP   12
+#define MSG_TIME 16
+#define MSG_PTX  20
+#define MSG_PTY  24
+
+static void msg_out(uint32_t dst, const MSG* m) {
+    if (!dst) return;
+    MEM32(dst + MSG_HWND) = h_put(m->hwnd);
+    MEM32(dst + MSG_MSG)  = m->message;
+    MEM32(dst + MSG_WP)   = (uint32_t)m->wParam;
+    MEM32(dst + MSG_LP)   = (uint32_t)m->lParam;
+    MEM32(dst + MSG_TIME) = m->time;
+    MEM32(dst + MSG_PTX)  = (uint32_t)m->pt.x;
+    MEM32(dst + MSG_PTY)  = (uint32_t)m->pt.y;
+}
+
+static void msg_in(uint32_t src, MSG* m) {
+    memset(m, 0, sizeof *m);
+    if (!src) return;
+    m->hwnd    = HWND_OF(MEM32(src + MSG_HWND));
+    m->message = MEM32(src + MSG_MSG);
+    m->wParam  = (WPARAM)MEM32(src + MSG_WP);
+    m->lParam  = (LPARAM)(int32_t)MEM32(src + MSG_LP);
+    m->time    = MEM32(src + MSG_TIME);
+    m->pt.x    = (LONG)MEM32(src + MSG_PTX);
+    m->pt.y    = (LONG)MEM32(src + MSG_PTY);
+}
+
+void imp_PeekMessageA(void) {
+    MSG m;
+    BOOL got = PeekMessageA(&m, HWND_OF(ARG(1)), ARG(2), ARG(3), ARG(4));
+    if (got) msg_out(ARG(0), &m);
+    RET(got ? 1 : 0);
+    STDRET(5);
+}
+
+void imp_TranslateMessage(void) {
+    MSG m; msg_in(ARG(0), &m);
+    RET(TranslateMessage(&m) ? 1 : 0);
+    STDRET(1);
+}
+
+void imp_DispatchMessageA(void) {
+    MSG m; msg_in(ARG(0), &m);
+    RET((uint32_t)(LONG_PTR)DispatchMessageA(&m));
+    STDRET(1);
+}
+
+/* ============================================================
+ * GDI. The imports here are exactly an 8-bit DIB blitter --
+ * CreateCompatibleDC + CreateDIBSection + SelectObject + BitBlt +
+ * SetDIBColorTable -- which is the engine's windowed presentation path.
+ * ============================================================ */
+
+void imp_GetDC(void)      { RET(h_put(GetDC(HWND_OF(ARG(0))))); STDRET(1); }
+void imp_ReleaseDC(void)  { RET((uint32_t)ReleaseDC(HWND_OF(ARG(0)), HDC_OF(ARG(1)))); STDRET(2); }
+void imp_CreateCompatibleDC(void) { RET(h_put(CreateCompatibleDC(HDC_OF(ARG(0))))); STDRET(1); }
+void imp_DeleteDC(void)   { RET(DeleteDC(HDC_OF(ARG(0))) ? 1 : 0); STDRET(1); }
+void imp_DeleteObject(void) { RET(DeleteObject((HGDIOBJ)h_ptr(ARG(0))) ? 1 : 0); STDRET(1); }
+void imp_SelectObject(void) { RET(h_put(SelectObject(HDC_OF(ARG(0)), (HGDIOBJ)h_ptr(ARG(1))))); STDRET(2); }
+void imp_GetStockObject(void) { RET(h_put(GetStockObject((int)ARG(0)))); STDRET(1); }
+void imp_SetStretchBltMode(void) { RET((uint32_t)SetStretchBltMode(HDC_OF(ARG(0)), (int)ARG(1))); STDRET(2); }
+void imp_LoadIconA(void)  { RET(h_put(LoadIconA(NULL, IDI_APPLICATION))); STDRET(2); }
+
+void shims_sync_dibs(void);
+
+void imp_BitBlt(void) {
+    shims_sync_dibs();     /* the engine drew into the arena, not into the DIB */
+    RET(BitBlt(HDC_OF(ARG(0)), (int)ARG(1), (int)ARG(2), (int)ARG(3),
+               (int)ARG(4), HDC_OF(ARG(5)), (int)ARG(6), (int)ARG(7),
+               ARG(8)) ? 1 : 0);
+    STDRET(9);
+}
+
+/*
+ * The pixels have to land in SIMULATED memory: the engine draws straight into
+ * the pointer this returns, and that pointer is a 32-bit VA on its side. So the
+ * bits are allocated from the arena and handed to CreateDIBSection as the
+ * section offset... which it cannot do. Instead the DIB owns host memory and
+ * the game gets a simulated alias, with the two kept in step at blit time.
+ *
+ * ponytail: one arena buffer per DIB, copied to the DIB's own bits on BitBlt.
+ * A copy per frame of a 640x480 8-bit surface is 300 KB -- invisible next to
+ * everything else here. Map the arena page directly if it ever shows up.
+ */
+#define MAX_DIBS 8
+static struct { HBITMAP bmp; void* host_bits; uint32_t sim_bits; uint32_t bytes; }
+    g_dibs[MAX_DIBS];
+static uint32_t g_dib_n;
+
+void imp_CreateDIBSection(void) {
+    uint32_t bmi = ARG(1);
+    void* bits = NULL;
+    HBITMAP b = CreateDIBSection(HDC_OF(ARG(0)), (const BITMAPINFO*)simp(bmi),
+                                 ARG(2), &bits, NULL, ARG(5));
+    if (!b || !bits) {
+        fprintf(stderr, "[gdi] CreateDIBSection failed (%lu)\n", GetLastError());
+        if (ARG(3)) MEM32(ARG(3)) = 0;
+        RET(0);
+        STDRET(6);
+        return;
+    }
+    /* Size from the header the caller just supplied. */
+    int32_t w = (int32_t)MEM32(bmi + 4), h = (int32_t)MEM32(bmi + 8);
+    uint32_t bpp = MEM32(bmi + 12) >> 16;
+    if (h < 0) h = -h;
+    uint32_t stride = (((uint32_t)w * bpp + 31) / 32) * 4;
+    uint32_t bytes = stride * (uint32_t)h;
+    uint32_t sim = arena_alloc(bytes ? bytes : 4);
+
+    if (g_dib_n < MAX_DIBS) {
+        g_dibs[g_dib_n].bmp = b;
+        g_dibs[g_dib_n].host_bits = bits;
+        g_dibs[g_dib_n].sim_bits = sim;
+        g_dibs[g_dib_n].bytes = bytes;
+        g_dib_n++;
+    }
+    fprintf(stderr, "[gdi] CreateDIBSection %dx%d %ubpp -> sim bits 0x%08X (%u bytes)\n",
+            w, h, bpp, sim, bytes);
+    if (ARG(3)) MEM32(ARG(3)) = sim;      /* the game draws here */
+    RET(h_put(b));
+    STDRET(6);
+}
+
+/* Push whatever the engine drew into the DIB the host will actually blit. */
+void shims_sync_dibs(void) {
+    for (uint32_t i = 0; i < g_dib_n; i++)
+        if (g_dibs[i].sim_bits && g_dibs[i].bytes)
+            memcpy(g_dibs[i].host_bits, (const void*)ADDR(g_dibs[i].sim_bits),
+                   g_dibs[i].bytes);
+}
+
+void imp_SetDIBColorTable(void) {
+    shims_sync_dibs();
+    RET(SetDIBColorTable(HDC_OF(ARG(0)), ARG(1), ARG(2),
+                         (const RGBQUAD*)simp(ARG(3))));
+    STDRET(4);
+}
+
+void imp_CreatePalette(void)  { RET(h_put(CreatePalette((const LOGPALETTE*)simp(ARG(0))))); STDRET(1); }
+void imp_SelectPalette(void)  { RET(h_put(SelectPalette(HDC_OF(ARG(0)), (HPALETTE)h_ptr(ARG(1)), (BOOL)ARG(2)))); STDRET(3); }
+void imp_RealizePalette(void) { RET(RealizePalette(HDC_OF(ARG(0)))); STDRET(1); }
+void imp_AnimatePalette(void) { RET(AnimatePalette((HPALETTE)h_ptr(ARG(0)), ARG(1), ARG(2), (const PALETTEENTRY*)simp(ARG(3))) ? 1 : 0); STDRET(4); }
+void imp_GetSystemPaletteEntries(void) { RET(GetSystemPaletteEntries(HDC_OF(ARG(0)), ARG(1), ARG(2), (LPPALETTEENTRY)simp(ARG(3)))); STDRET(4); }
+
+/* ============================================================
  * The registry, forwarded to the host's. MechCommander keeps its settings in
  * HKCU like any other Win32 app, so there is nothing to emulate -- only the
  * handle to translate. The predefined roots (HKEY_CURRENT_USER and friends)
