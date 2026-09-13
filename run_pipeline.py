@@ -66,9 +66,11 @@ def _balance(va):
             # the report, which is what turns "something inside _initterm" into
             # the one static constructor that misbehaved.
             return (f'{{ uint32_t _sp0 = g_esp, _bp0 = ebp, '
-                    f'_tg = (uint32_t)({target}); RECOMP_ICALL(_tg); '
+                    f'_tg = (uint32_t)({target}); RECOMP_PUSHSITE(0x{va:08X}u); '
+                    f'RECOMP_ICALL(_tg); '
                     f'RECOMP_BALANCE2(_sp0, _bp0, 0x{va:08X}u, _tg); }}')
-        return (f'{{ uint32_t _sp0 = g_esp, _bp0 = ebp; RECOMP_CALL({target}); '
+        return (f'{{ uint32_t _sp0 = g_esp, _bp0 = ebp; '
+                f'RECOMP_PUSHSITE(0x{va:08X}u); RECOMP_CALL({target}); '
                 f'RECOMP_BALANCE(_sp0, _bp0, 0x{va:08X}u); }}')
     return sub
 
@@ -316,13 +318,16 @@ def write_chunk(out, idx, chunk):
                 'void recomp_check_balance(uint32_t sp, uint32_t bp, uint32_t site);\n'
                 'void recomp_check_balance2(uint32_t sp, uint32_t bp,\n'
                 '                           uint32_t site, uint32_t target);\n'
+                'void recomp_push_site(uint32_t site);\n'
                 '#define RECOMP_PC(va) (g_cur_pc = (va))\n'
+                '#define RECOMP_PUSHSITE(site) recomp_push_site(site)\n'
                 '#define RECOMP_BALANCE(sp, bp, site) '
                 'recomp_check_balance((sp), (bp), (site))\n'
                 '#define RECOMP_BALANCE2(sp, bp, site, tgt) '
                 'recomp_check_balance2((sp), (bp), (site), (tgt))\n'
                 '#else\n'
                 '#define RECOMP_PC(va) ((void)0)\n'
+                '#define RECOMP_PUSHSITE(site) ((void)0)\n'
                 '#define RECOMP_BALANCE(sp, bp, site) ((void)0)\n'
                 '#define RECOMP_BALANCE2(sp, bp, site, tgt) ((void)0)\n'
                 '#endif\n\n')

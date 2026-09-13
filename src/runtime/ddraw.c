@@ -143,6 +143,59 @@ static void present(surface_t* s) {
         }
     }
 
+    /* Is the engine actually drawing? A black window can mean "nothing was
+     * presented", "nothing was drawn" or "the palette is black", and those are
+     * three different bugs. Count the non-zero pixels and show the palette. */
+    {
+        static int shown;
+        if (shown < 6) {
+            shown++;
+            size_t nz = 0;
+            for (uint32_t y = 0; y < s->height; y++) {
+                const uint8_t* row = src + (size_t)y * s->pitch;
+                for (uint32_t x = 0; x < s->width; x++)
+                    if (row[x]) nz++;
+            }
+            uint32_t dbytes = 0, dbits = shims_dib_bits(&dbytes);
+            size_t dnz = 0;
+            if (dbits) {
+                const uint8_t* p = (const uint8_t*)ADDR(dbits);
+                for (uint32_t i = 0; i < dbytes; i++)
+                    if (p[i]) dnz++;
+            }
+            fprintf(stderr, "[ddraw] present: surface %zu/%u non-zero, "
+                    "engine DIB %zu/%u non-zero, pal[1]=%02X%02X%02X\n",
+                    nz, s->width * s->height, dnz, dbytes,
+                    g_pal[1].rgbRed, g_pal[1].rgbGreen, g_pal[1].rgbBlue);
+
+            /* If neither buffer has pixels, the engine is drawing SOMEWHERE.
+             * Sweep the committed arena and name the densest 64 KB blocks --
+             * whatever holds the art is where its screen buffer really is. */
+            if (nz == 0 && dnz == 0 && shown == 1) {
+                uint32_t base = shims_arena_base(), top = shims_arena_committed();
+                uint32_t best[3] = {0, 0, 0};
+                size_t bestn[3] = {0, 0, 0};
+                for (uint32_t blk = base; blk + 0x10000 <= top; blk += 0x10000) {
+                    const uint8_t* p = (const uint8_t*)ADDR(blk);
+                    size_t c = 0;
+                    for (uint32_t i = 0; i < 0x10000; i++)
+                        if (p[i]) c++;
+                    for (int k = 0; k < 3; k++)
+                        if (c > bestn[k]) {
+                            for (int j = 2; j > k; j--) {
+                                bestn[j] = bestn[j - 1]; best[j] = best[j - 1];
+                            }
+                            bestn[k] = c; best[k] = blk;
+                            break;
+                        }
+                }
+                for (int k = 0; k < 3; k++)
+                    fprintf(stderr, "[ddraw]   densest arena block %08X: "
+                            "%zu/65536 non-zero\n", best[k], bestn[k]);
+            }
+        }
+    }
+
     HDC wdc = GetDC(g_hwnd);
     HGDIOBJ old = SelectObject(g_memdc, g_dib);
     RECT rc;
@@ -279,6 +332,8 @@ static void sf_Unlock(void) {
 
 static void sf_Flip(void) {
     surface_t* s = surf_of(ARG(0));
+    static int shown;
+    if (shown < 3) { shown++; fprintf(stderr, "[ddraw] Flip\n"); }
     if (s) present(s->back >= 0 ? &g_surf[s->back] : s);
     RET(DD_OK);
     STDRET(3);

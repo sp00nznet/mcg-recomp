@@ -66,6 +66,7 @@ void shims_report(void) {
 
 uint32_t shims_arena_base(void) { return g_arena_base; }
 uint32_t shims_arena_end(void)  { return g_arena_end; }
+uint32_t shims_arena_committed(void) { return g_arena_committed; }
 
 static uint32_t arena_commit_to(uint32_t want_end) {
     if (want_end <= g_arena_committed) return 1;
@@ -1264,7 +1265,77 @@ static void msg_in(uint32_t src, MSG* m) {
     m->pt.y    = (LONG)MEM32(src + MSG_PTY);
 }
 
+/* ============================================================
+ * The multimedia timer
+ *
+ * timeSetEvent returning 0 means "could not create the timer", and the engine
+ * drives its heartbeat from one -- so with the stub in place its state machine
+ * never ticked and it sat flipping a blank screen.
+ *
+ * The callback is run from the message pump on the MAIN thread rather than
+ * from a real timer thread. That is deliberate: the recomp's registers and
+ * stack are global, so re-entering lifted code from another thread would
+ * corrupt whatever the main thread was in the middle of. A periodic callback
+ * serviced a little late is a far better trade than that.
+ *
+ * ponytail: serviced from PeekMessage, so the resolution is the frame rate.
+ * Fine for a heartbeat; a real timer thread would need the CPU state made
+ * per-thread first.
+ * ============================================================ */
+
+static uint32_t g_timer_proc, g_timer_user, g_timer_period, g_timer_id;
+static DWORD g_timer_last;
+
+void imp_timeGetDevCaps(void) {
+    uint32_t p = ARG(0);
+    if (p && ARG(1) >= 8) { MEM32(p) = 1; MEM32(p + 4) = 1000000; }
+    RET(0);                                  /* TIMERR_NOERROR */
+    STDRET(2);
+}
+
+void imp_timeSetEvent(void) {
+    g_timer_period = ARG(0) ? ARG(0) : 1;
+    g_timer_proc = ARG(2);
+    g_timer_user = ARG(3);
+    g_timer_last = GetTickCount();
+    g_timer_id = 1;
+    fprintf(stderr, "[time] timeSetEvent(%u ms, proc=0x%08X) -> id %u\n",
+            g_timer_period, g_timer_proc, g_timer_id);
+    RET(g_timer_id);
+    STDRET(5);
+}
+
+void imp_timeKillEvent(void) {
+    g_timer_proc = 0;
+    g_timer_id = 0;
+    RET(0);
+    STDRET(1);
+}
+
+void imp_timeGetSystemTime(void) {
+    if (ARG(0)) MEM32(ARG(0)) = GetTickCount();   /* MMTIME: wType, u.ms */
+    RET(0);
+    STDRET(2);
+}
+
+/* Called from the pump. Re-entrancy is guarded: the callback can itself pump. */
+static void service_timer(void) {
+    static int inside;
+    if (!g_timer_proc || inside) return;
+    DWORD now = GetTickCount();
+    if (now - g_timer_last < g_timer_period) return;
+    g_timer_last = now;
+    inside = 1;
+    { static int shown; if (shown < 3) { shown++;
+        fprintf(stderr, "[time] heartbeat firing\n"); } }
+    /* TimeProc(uTimerID, uMsg, dwUser, dw1, dw2), stdcall. */
+    uint32_t args[5] = { g_timer_id, 0, g_timer_user, 0, 0 };
+    call_lifted(g_timer_proc, 5, args);
+    inside = 0;
+}
+
 void imp_PeekMessageA(void) {
+    service_timer();
     MSG m;
     BOOL got = PeekMessageA(&m, HWND_OF(ARG(1)), ARG(2), ARG(3), ARG(4));
     if (got) msg_out(ARG(0), &m);
@@ -1303,6 +1374,9 @@ void imp_LoadIconA(void)  { RET(h_put(LoadIconA(NULL, IDI_APPLICATION))); STDRET
 void shims_sync_dibs(void);
 
 void imp_BitBlt(void) {
+    { static int shown; if (shown < 3) { shown++;
+        fprintf(stderr, "[gdi] BitBlt %dx%d -- the GDI display path is in use\n",
+                (int)ARG(3), (int)ARG(4)); } }
     shims_sync_dibs();     /* the engine drew into the arena, not into the DIB */
     RET(BitBlt(HDC_OF(ARG(0)), (int)ARG(1), (int)ARG(2), (int)ARG(3),
                (int)ARG(4), HDC_OF(ARG(5)), (int)ARG(6), (int)ARG(7),
@@ -1358,6 +1432,14 @@ void imp_CreateDIBSection(void) {
     if (ARG(3)) MEM32(ARG(3)) = sim;      /* the game draws here */
     RET(h_put(b));
     STDRET(6);
+}
+
+/* Where the engine's own DIB lives, so the DirectDraw present can say whether
+ * the drawing went there instead of into the surface it flips. */
+uint32_t shims_dib_bits(uint32_t* bytes) {
+    if (!g_dib_n) return 0;
+    if (bytes) *bytes = g_dibs[0].bytes;
+    return g_dibs[0].sim_bits;
 }
 
 /* Push whatever the engine drew into the DIB the host will actually blit. */

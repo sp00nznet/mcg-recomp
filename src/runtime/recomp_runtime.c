@@ -111,6 +111,84 @@ static void note_callsite(uint32_t site, uint32_t target) {
     g_callsite_i++;
 }
 
+/* A shadow call STACK, pushed before each call and popped after it returns.
+ *
+ * The ring above only ever sees calls that came back, which makes it blind to
+ * exactly the path that faults: every frame between the crash and whatever
+ * started it is, by definition, still outstanding. This keeps those. */
+#define CALLSTACK_MAX 256
+static uint32_t g_callstack[CALLSTACK_MAX];
+static uint32_t g_callstack_n;
+
+/*
+ * A watch on one simulated dword, checked at every call boundary.
+ *
+ * "Who wrote over this object?" is not answerable from a crash dump -- by the
+ * time it faults the writer is long gone. Polling the value after every call
+ * narrows the culprit to a single call site, which for a blitter smashing the
+ * heap is all that is needed. Set MCG_WATCH=0xADDRESS to arm it.
+ *
+ * ponytail: a poll, not a hardware watchpoint. It names the call during which
+ * the value changed rather than the instruction; a guard page would give the
+ * instruction and can replace this if a call site is ever too coarse.
+ */
+static uint32_t g_watch_va, g_watch_val;
+static int g_watch_armed;
+
+/* The arena is reserved but committed on demand, so the address is usually not
+ * mapped yet when the watch is requested. VirtualQuery answers that without
+ * touching it -- probing under SEH instead raised an exception per call, and
+ * the crash handler is a vectored one, so it reported every single one. */
+static int watch_read(uint32_t va, uint32_t* out) {
+    MEMORY_BASIC_INFORMATION mbi;
+    void* p = (void*)(uintptr_t)ADDR(va);
+    if (!VirtualQuery(p, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT)
+        return 0;
+    *out = MEM32(va);
+    return 1;
+}
+
+static void watch_init(void) {
+    const char* s = getenv("MCG_WATCH");
+    if (!s) return;
+    g_watch_va = (uint32_t)strtoul(s, NULL, 0);
+    fprintf(stderr, "[watch] arming on %08X\n", g_watch_va);
+}
+
+static void watch_check(uint32_t site) {
+    uint32_t now;
+    if (!g_watch_va || !watch_read(g_watch_va, &now)) return;
+    if (!g_watch_armed) {                 /* first time it is mapped */
+        g_watch_armed = 1;
+        g_watch_val = now;
+        fprintf(stderr, "[watch] %08X mapped, now %08X (at call 0x%08X)\n",
+                g_watch_va, now, site);
+        return;
+    }
+    if (now == g_watch_val) return;
+    fprintf(stderr, "[watch] %08X changed %08X -> %08X across the call at "
+                    "0x%08X\n", g_watch_va, g_watch_val, now, site);
+    g_watch_val = now;
+}
+
+void recomp_push_site(uint32_t site) {
+    if (g_callstack_n < CALLSTACK_MAX)
+        g_callstack[g_callstack_n] = site;
+    g_callstack_n++;
+}
+
+static void pop_site(void) {
+    if (g_callstack_n) g_callstack_n--;
+}
+
+static void dump_callstack(void) {
+    fprintf(stderr, "  call stack (outermost first, %u deep):\n", g_callstack_n);
+    uint32_t n = g_callstack_n < CALLSTACK_MAX ? g_callstack_n : CALLSTACK_MAX;
+    uint32_t from = n > 24 ? n - 24 : 0;       /* the innermost two dozen */
+    for (uint32_t i = from; i < n; i++)
+        fprintf(stderr, "    called from 0x%08X\n", g_callstack[i]);
+}
+
 static void dump_callsites(void) {
     fprintf(stderr, "  recent indirect call sites (oldest first):\n");
     for (uint32_t i = 0; i < CALLSITE_RING; i++) {
@@ -125,6 +203,8 @@ static void dump_callsites(void) {
  * function rather than only the dispatch site it went through. */
 void recomp_check_balance2(uint32_t sp_before, uint32_t bp_before,
                            uint32_t site, uint32_t target) {
+    pop_site();
+    watch_check(site);
     note_callsite(site, target);
     check_bp(bp_before, site, target);
 #if RECOMP_RETADDR
@@ -147,6 +227,8 @@ void recomp_check_balance(uint32_t sp_before, uint32_t bp_before, uint32_t site)
     /* Direct calls are recorded too: a derived draw() calling its own base
      * class is a direct call, and that is exactly the edge where a `this`
      * arrives already wrong. */
+    pop_site();
+    watch_check(site);
     note_callsite(site, 0);
     check_bp(bp_before, site, 0);
     /* The poison is the real prize. RECOMP_RETADDR is a value no program would
@@ -206,6 +288,7 @@ static void report_extra(void) {
     dump_around("ecx", g_ecx);
     dump_around("esi", g_esi);
     dump_around("edi", g_edi);
+    dump_callstack();
     dump_callsites();
 #ifdef RECOMP_TRACE
     fprintf(stderr, "  faulting instruction: 0x%08X\n", g_cur_pc);
@@ -711,6 +794,7 @@ int main(int argc, char** argv) {
         if (!strcmp(argv[i], "--selftest"))
             return crt_selftest();
 
+    watch_init();
     fprintf(stderr, "[runtime] entering at 0x%08X\n", MCG_ENTRY);
     PUSH32(g_esp, RECOMP_RETADDR);
     entry();

@@ -181,6 +181,36 @@ range.
   **DPERR_NOTLOBBIED (0x8877042E)** -- WasLaunchedFromLobby tests for exactly
   that code to conclude the game was started normally.
 
+### THE BIG ONE: rep movs/stos ignored the direction flag
+The lifter emitted every rep string op as a forward memcpy that always
+INCREMENTED esi/edi, whatever DF was. With `std` set a real CPU walks DOWN.
+`VFX_pane_copy` (Vfxa.obj, hand-written asm) takes that path for an overlapping
+blit, so the lifted copy read and wrote from the wrong end and ran off past its
+destination -- straight over a live C++ object, vtable and all. That was the
+`lObject::draw` crash, and every mysterious heap corruption before it.
+
+Fixed in pcrecomp's lift32.py for movs and stos, using memmove (overlap is the
+whole reason the backward form exists). 5 new difftest cases, all matching
+hardware; suite is 87/90 with 3 known divergences, 0 failures.
+**After this the engine stopped crashing entirely.**
+
+### How the writer was found (reusable recipe)
+`MCG_WATCH=0xADDRESS` arms a poll on one simulated dword, checked after every
+call. It reported: `02C9D4DC changed 007816F0 -> 1010FFFF across the call at
+0x0060CB88` -- aPort::copyTo+0x48, i.e. VFX_pane_copy. A crash dump could never
+have said that: by the time it faults the writer is long gone.
+
+The shadow call STACK (pushed per call, popped on return) gives the path the
+crash is ON, which the completed-call ring cannot -- every frame between the
+fault and its origin is still outstanding, so the ring never sees them.
+
+### The multimedia timer must work
+`timeSetEvent` returning 0 means "could not create the timer", and the engine
+drives its heartbeat from one (50 ms, proc 0x0061EE80). It is serviced from
+PeekMessage on the MAIN thread on purpose: the recomp's registers and stack are
+global, so re-entering lifted code from a real timer thread would corrupt
+whatever the main thread was in the middle of.
+
 ### Lifted-CRT self-test (reach for this first)
 `build-trace/mcg_recomp.exe MCX.EXE --selftest` calls the lifted CRT string
 routines with known inputs and compares against the host's answers. When the
