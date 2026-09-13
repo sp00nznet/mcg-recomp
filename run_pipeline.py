@@ -162,7 +162,19 @@ def _switch_tables(md, code_data, code_start, lo, hi):
     destinations and need labels.
     """
     tables, targets = {}, set()
+    # A dense MSVC switch emits TWO tables: a byte index table read with
+    # `movzx r, byte ptr [r + disp]`, then the dword target table the jmp uses.
+    # Only the second is reachable from the jmp, so the first used to be
+    # decoded as code -- and in translateMessage those bytes disassemble to
+    # `popal`, which pops every register including ebp. Collect the byte-table
+    # displacements here and close the gap below.
+    byte_tables = set()
     for insn in md.disasm(code_data[lo - code_start:hi - code_start], lo):
+        if insn.mnemonic == 'movzx' and len(insn.operands) == 2:
+            src = insn.operands[1]
+            if (src.type == X86_OP_MEM and src.size == 1
+                    and lo <= (src.mem.disp & 0xFFFFFFFF) < hi):
+                byte_tables.add(src.mem.disp & 0xFFFFFFFF)
         if insn.mnemonic != 'jmp' or not insn.operands:
             continue
         op = insn.operands[0]
@@ -171,6 +183,10 @@ def _switch_tables(md, code_data, code_start, lo, hi):
         start = op.mem.disp & 0xFFFFFFFF
         if not (lo <= start < hi):
             continue
+        # A byte table immediately preceding this one runs up to it.
+        for b in byte_tables:
+            if b < start:
+                tables[b] = start
         # Entries run until one stops being an address inside this function.
         end = start
         while end + 4 <= hi:
@@ -213,8 +229,13 @@ def linear_disassemble(md, code_data, code_start, lo, hi):
                 if t and lo <= t < hi:
                     leaders.add(t)
                 leaders.add(li.end_address)
-            if li.mnemonic == 'int3':
-                return insns, leaders
+            # NOT a stopping point. MSVC pads between basic blocks with int3,
+            # so halting here truncates the function at its first gap --
+            # handleEvent lost everything past 0x611564, including BOTH of its
+            # `ret`s, so the lifted body fell out through the end instead of
+            # running its epilogue and never restored the caller's ebp. Trailing
+            # int3 padding after the last ret is unreachable, so decoding it
+            # costs nothing.
         if not advanced:                  # undecodable byte: give up on the rest
             break
     return insns, leaders
@@ -551,10 +572,18 @@ def main():
             if not insns:
                 continue
             # Trim padding after a ret that nothing jumps back into.
+            #
+            # int3 is SKIPPED, not a stopping point. MSVC pads between basic
+            # blocks with it, so breaking here truncated the instruction list
+            # mid-function: handleEvent lost everything past 0x611564,
+            # including both of its `ret`s, and the lifted body fell out
+            # through the end instead of running its epilogue -- which is why
+            # it never restored the caller's ebp and the corruption cascaded
+            # all the way up to aCallback::exec.
             trimmed, seen_ret = [], False
             for ins in insns:
                 if ins.mnemonic == 'int3':
-                    break
+                    continue
                 if seen_ret:
                     if ins.address not in leaders:
                         continue
