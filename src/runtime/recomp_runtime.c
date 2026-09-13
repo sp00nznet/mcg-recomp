@@ -882,8 +882,54 @@ static void mcg_ObjectMap_addObject(void) {
     }
 }
 
+/*
+ * Where is the camera, and who moved it?
+ *
+ * Selecting a 'Mech slides the battlefield off the right of the screen in two
+ * discrete steps -- a camera jumping to a target and overshooting, rather than
+ * a render failing. Position is three floats at [Camera + 0xBC].
+ */
+static float mcg_f32(uint32_t va) {
+    uint32_t bits = MEM32(va);
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+}
+
+void recomp_Camera__update_006AEB80(void);
+static void mcg_Camera_update(void) {
+    static unsigned n;
+    static float last_x, last_y;
+    uint32_t self = g_ecx;
+    recomp_Camera__update_006AEB80();
+    {
+        float x = mcg_f32(self + 0xBCu), y = mcg_f32(self + 0xC0u);
+        float dx = x - last_x, dy = y - last_y;
+        if (dx < 0) dx = -dx;
+        if (dy < 0) dy = -dy;
+        /* Only when it actually moves, and then only every eighth time: a
+         * per-frame dump of a 30Hz camera buries everything else in the log. */
+        if ((dx > 1.0f || dy > 1.0f) && (n++ % 8) == 0)
+            fprintf(stderr, "[cam] %08X at (%.1f, %.1f, %.1f)\n", self,
+                    x, y, mcg_f32(self + 0xC4u));
+        last_x = x;
+        last_y = y;
+    }
+}
+
+void recomp_Camera__changeTarget_006AFB30(void);
+static void mcg_Camera_changeTarget(void) {
+    uint32_t self = g_ecx, obj = MEM32(g_esp + 4);
+    fprintf(stderr, "[cam] changeTarget(%08X, %d) from (%.1f, %.1f)\n",
+            obj, (int)MEM32(g_esp + 8),
+            mcg_f32(self + 0xBCu), mcg_f32(self + 0xC0u));
+    recomp_Camera__changeTarget_006AFB30();
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     switch (va) {
+    case 0x006AEB80u: return mcg_Camera_update;
+    case 0x006AFB30u: return mcg_Camera_changeTarget;
     case 0x006BB4D0u: return mcg_ObjectMap_addObject;
     case 0x0060A780u: return mcg_aObject_ShowGUIWindow;
     case 0x006DCEF0u: return mcg_BriefingScreen_ShowGUIWindow;

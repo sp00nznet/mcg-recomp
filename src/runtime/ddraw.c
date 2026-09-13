@@ -795,10 +795,29 @@ void ddraw_map_cursor(POINT* p) {
         p->x = p->x * (LONG)g_shown_w / rc.right;
         p->y = p->y * (LONG)g_shown_h / rc.bottom;
     }
-    if (p->x < 0) p->x = 0;
-    if (p->y < 0) p->y = 0;
-    if (p->x >= (LONG)g_shown_w) p->x = (LONG)g_shown_w - 1;
-    if (p->y >= (LONG)g_shown_h) p->y = (LONG)g_shown_h - 1;
+    /*
+     * A pointer outside the window holds its last position inside it.
+     *
+     * Clamping to the edge instead looks harmless and is not: in a mission the
+     * engine reads a pointer at the screen edge as "scroll the camera this
+     * way", so the moment the mouse left the window the battlefield scrolled
+     * off diagonally at a steady ~100 units an update and never stopped. It
+     * reads exactly like a camera bug -- the terrain slides away and the HUD
+     * keeps working -- which is what it was mistaken for.
+     *
+     * Fullscreen, the question never arises because the pointer cannot leave.
+     * Windowed, holding the last inside position is the honest equivalent: the
+     * game sees the pointer while it is over the window and nothing after.
+     */
+    static LONG held_x, held_y;
+    if (p->x < 0 || p->y < 0 ||
+        p->x >= (LONG)g_shown_w || p->y >= (LONG)g_shown_h) {
+        p->x = held_x;
+        p->y = held_y;
+    } else {
+        held_x = p->x;
+        held_y = p->y;
+    }
 }
 
 static void dd_SetCooperativeLevel(void) {

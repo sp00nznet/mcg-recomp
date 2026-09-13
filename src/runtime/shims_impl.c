@@ -1491,9 +1491,22 @@ void imp_GetCursorPos(void) {
     POINT p = { 0, 0 };
     BOOL ok = TRUE;
     int sx, sy;
+    /* MCG_CURSOR="x,y" pins the pointer, in the engine's own screen
+     * coordinates, whenever nothing is scripted. Without it an unattended run
+     * inherits whatever the real mouse happens to be doing -- and a pointer
+     * resting near a screen edge means "scroll" to a mission, so the
+     * battlefield drifts away on its own and it looks like a camera fault. */
+    static int pinned = -1, pin_x, pin_y;
+    if (pinned < 0) {
+        const char* e = getenv("MCG_CURSOR");
+        pinned = (e && sscanf(e, "%d,%d", &pin_x, &pin_y) == 2);
+    }
     if (click_now(&sx, &sy)) {            /* scripted: already engine space */
         p.x = sx;
         p.y = sy;
+    } else if (pinned) {
+        p.x = pin_x;
+        p.y = pin_y;
     } else {
         ok = GetCursorPos(&p);
         ddraw_map_cursor(&p);             /* desktop -> the engine's screen */
