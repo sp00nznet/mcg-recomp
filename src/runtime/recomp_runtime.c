@@ -829,8 +829,41 @@ static void mcg_BriefingScreen_ShowGUIWindow(void) {
             sp ? (int)MEM32(sp + 0x54u) : -1);
 }
 
+/*
+ * lPort::init(char* name) -- does the art actually arrive?
+ *
+ * MechBriefBlock::drawBackground builds each Ready Area entry out of temporary
+ * ports loaded by name and then copies them in. The copies are the part that
+ * does not land, and the blitters underneath are all self-tested, so the
+ * question is whether the source port has any pixels in it at all.
+ */
+void recomp_lPort__init_007106D0(void);
+static void mcg_lPort_init_named(void) {
+    static int shown;
+    uint32_t self = g_ecx, name = MEM32(g_esp + 4);
+    recomp_lPort__init_007106D0();
+    if (shown < 24) {
+        uint32_t pane = MEM32(self + 0x10u), win = pane ? MEM32(pane) : 0;
+        size_t nz = 0, n = 0;
+        if (win) {
+            uint32_t w = MEM32(win + 4) + 1, h = MEM32(win + 8) + 1;
+            const uint8_t* px = (const uint8_t*)ADDR(MEM32(win));
+            n = (size_t)w * h;
+            for (size_t k = 0; k < n; k++) if (px[k]) nz++;
+            shown++;
+            fprintf(stderr, "[art] \"%s\" -> %ux%u, %zu/%zu non-zero\n",
+                    name ? (const char*)ADDR(name) : "(null)", w, h, nz, n);
+        } else {
+            shown++;
+            fprintf(stderr, "[art] \"%s\" -> NO WINDOW\n",
+                    name ? (const char*)ADDR(name) : "(null)");
+        }
+    }
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     switch (va) {
+    case 0x007106D0u: return mcg_lPort_init_named;
     case 0x0060A780u: return mcg_aObject_ShowGUIWindow;
     case 0x006DCEF0u: return mcg_BriefingScreen_ShowGUIWindow;
     case 0x006DD410u: return mcg_setUpDeploy;
@@ -1162,8 +1195,17 @@ static int crt_selftest(void) {
         const uint8_t* dp = (const uint8_t*)ADDR(dbuf);
         int bad = 0;
 
-        for (int i = 0; i < SW * SH; i++) sp[i] = (uint8_t)(i | 1);
-        memset((void*)ADDR(dbuf), 0, DW * DH);
+        /* 0xFF is the transparent index -- the scalar tail reads
+         * `cmp al, 0xff; je skip`, and the fast path is MMX doing that same
+         * test eight bytes at a time with pcmpeqb/pand/pandn/por, plus
+         * psllq/psrlq to realign an unaligned source. A source with no 0xFF
+         * in it exercises none of that, which is how this case passed while
+         * every transparent picture in the game blitted as nothing. So:
+         * sprinkle transparent pixels through the source, and give the
+         * destination a marker that has to survive underneath them. */
+        for (int i = 0; i < SW * SH; i++)
+            sp[i] = (i % 3 == 0) ? 0xFF : (uint8_t)(i | 1);
+        memset((void*)ADDR(dbuf), 0x55, DW * DH);
         MEM32(swin) = sbuf; MEM32(swin + 4) = SW - 1; MEM32(swin + 8) = SH - 1;
         MEM32(dwin) = dbuf; MEM32(dwin + 4) = DW - 1; MEM32(dwin + 8) = DH - 1;
         /* The real caller (lObject::display) hands over a pane that already
@@ -1178,10 +1220,59 @@ static int crt_selftest(void) {
         for (int y = 0; y < DH; y++)
             for (int x = 0; x < DW; x++) {
                 int in = (x >= DX && x < DX + SW && y >= DY && y < DY + SH);
-                uint8_t want = in ? sp[(y - DY) * SW + (x - DX)] : 0;
+                uint8_t src = in ? sp[(y - DY) * SW + (x - DX)] : 0xFF;
+                /* 0xFF leaves whatever was already there. */
+                uint8_t want = (src == 0xFF) ? 0x55 : src;
                 if (dp[y * DW + x] != want) bad++;
             }
-        expect("DrawTransparent 22x6 at (3,2)", (uint32_t)bad, 0);
+        expect("DrawTransparent 22x6, transparent", (uint32_t)bad, 0);
+
+        /*
+         * Again at the shape the game actually uses. DrawTransparent's fast
+         * path reads eight bytes at a time and only runs its psllq/psrlq
+         * realignment when the source is NOT 8-aligned -- so a tidy little
+         * test buffer can skip that half of the routine entirely. The Ready
+         * Area's art is 194 and 207 bytes wide, which guarantees a different
+         * misalignment on every row.
+         */
+        {
+            const int W = 194, H = 12, DW2 = 256, DH2 = 32, X2 = 5, Y2 = 3;
+            uint32_t sb = shims_alloc(W * H + 8) + 3;      /* deliberately odd */
+            uint32_t db = shims_alloc(DW2 * DH2);
+            uint32_t sw = shims_alloc(12), dw = shims_alloc(12);
+            uint32_t dpn = shims_alloc(20), b[6];
+            uint8_t* s2 = (uint8_t*)ADDR(sb);
+            const uint8_t* d2 = (const uint8_t*)ADDR(db);
+            int bad2 = 0;
+
+            for (int i = 0; i < W * H; i++)
+                s2[i] = (i % 5 == 0) ? 0xFF : (uint8_t)(i | 1);
+            memset((void*)ADDR(db), 0x55, DW2 * DH2);
+            MEM32(sw) = sb; MEM32(sw + 4) = W - 1; MEM32(sw + 8) = H - 1;
+            MEM32(dw) = db; MEM32(dw + 4) = DW2 - 1; MEM32(dw + 8) = DH2 - 1;
+            MEM32(dpn) = dw; MEM32(dpn + 4) = X2; MEM32(dpn + 8) = Y2;
+            MEM32(dpn + 12) = X2 + W - 1; MEM32(dpn + 16) = Y2 + H - 1;
+
+            b[0] = dpn; b[1] = sw; b[2] = 0; b[3] = 0; b[4] = W; b[5] = H;
+            call_lifted(DRAW_TRANS, 6, b);
+            for (int y = 0; y < DH2; y++)
+                for (int x = 0; x < DW2; x++) {
+                    int in = (x >= X2 && x < X2 + W && y >= Y2 && y < Y2 + H);
+                    uint8_t src = in ? s2[(y - Y2) * W + (x - X2)] : 0xFF;
+                    uint8_t want = (src == 0xFF) ? 0x55 : src;
+                    if (d2[y * DW2 + x] != want) bad2++;
+                }
+            expect("DrawTransparent 194x12, unaligned", (uint32_t)bad2, 0);
+            if (bad2) {
+                fprintf(stderr, "         first row, want vs got:\n");
+                for (int k = 0; k < 40; k++) {
+                    uint8_t src = s2[k];
+                    fprintf(stderr, "%s%02X/%02X", k ? " " : "         ",
+                            src == 0xFF ? 0x55 : src, d2[Y2 * DW2 + X2 + k]);
+                }
+                fputc('\n', stderr);
+            }
+        }
         if (bad) {
             for (int y = 0; y < DH; y++) {
                 fprintf(stderr, "         ");
