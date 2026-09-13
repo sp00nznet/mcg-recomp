@@ -407,14 +407,15 @@ positive, zero and negative, plus the whole `seekPacket` tail end to end.
 
 Open, and honestly open rather than fixed:
 
-- **The launch control has not been found.** Deploying works: three New
-  Campaign clicks and a drag from the first Ready Area entry into Force Group 1
-  gives CURRENT DROP WEIGHT 25 TONS and FORCE GROUP 1 reading 28, so a 'Mech
-  really is assigned. But `Mission::run`'s state machine stays at 3, the
-  logistics shell, whatever is clicked next. The state-3 branch writes no state
-  at all, so a mission is started from outside `Mission::run`;
-  `BriefingScreen::handleEvent` touches the Mission object once and is the next
-  thing to read.
+- **The launch button refuses, it is not missing.** Its rect is
+  `(517,330)-(624,348)` in the engine's own UI coordinates, read out of
+  `BriefingScreen::handleEvent`, and clicking the centre reaches the handler.
+  The gate is a chain: the button must be enabled, `[0x8080A8]` non-zero and
+  either above `[0x8080AC]` or `Logistics::requiredAssigned()` true, else
+  `[Logistics+0x18BC]` non-zero. Past it the engine calls
+  `Mission::StartScenario` with the current scenario name. So a mission starts
+  once the force satisfies `requiredAssigned` -- which is about WHICH units are
+  deployed, not how many. Deploying works (see above); one 'Mech is not enough.
 - **Each Ready Area entry draws only ~160 of its 2392 pixels** -- nine distinct
   palette indices, 2233 of them the wipe colour. This is NOT what blocks
   deployment: the entries are live objects with working hit-testing whether or

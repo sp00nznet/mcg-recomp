@@ -264,17 +264,28 @@ lObjects with working hit-testing whether or not they draw, so the drag lands
 on an invisible widget perfectly well. Do not go back to treating the drawing
 defect as the blocker.
 
-What is still missing is the launch control. Mission::run's state machine stays
-at 3 (the logistics shell) no matter what gets clicked. Ruled out by clicking
-them with `MCG_WATCH=*0x8087A8+0` armed, which reports every state change:
-the wide bar beside the drop-weight readout at UI (572,337) -- that one
-actually UNDEPLOYS the 'Mech -- the "MISSION" vertical tab at (208,263), and
-the bottom corners at (600,465) and (320,465). The state-3 branch of
-Mission::run contains no state write at all, so whatever starts a mission sets
-it from outside; `moveOnButtonHandleEvent` is bound to MissionResultsScreen,
-not the briefing, and StartMissionCallback is referenced only by
-SessionScreen::init, which is multiplayer. BriefingScreen::handleEvent touches
-the Mission object once and has not been read yet -- start there.
+**The launch button is at UI rect (517,330)-(624,348)** -- read straight out of
+BriefingScreen::handleEvent, which loads x0=0x205, y0=0x14A, x1=0x270, y1=0x15C
+into a rect at 0x006DCAC4 and hit-tests it. Clicking its centre, UI (570,339),
+does reach the handler. The game is refusing, not missing the click.
+
+The gate, in order (0x006DCAE8 onward):
+
+  [BriefingScreen + 0x4C8] != 0        -> button disabled, return
+  [0x8080A8] == 0                      -> playBettySample(0x1B), "not ready"
+  [0x8080A8] > [0x8080AC]              -> skip the next check
+  Logistics::requiredAssigned() == 0   -> fall through to...
+  [Logistics + 0x18BC] == 0            -> playBettySample(0x1B), "not ready"
+
+Past all that it plays sample 0x3A and calls Mission::StartScenario with
+[[Mission+0x24] + [Mission+0x20]*4] -- the current scenario's name. So the way
+in is to satisfy `requiredAssigned`, which is the mission's own requirement
+about WHICH units are deployed, not merely how many: one 'Mech in Force Group 1
+is not enough. Find what it checks and deploy accordingly.
+
+Note the wide bar beside the drop-weight readout IS this button -- clicking it
+with one 'Mech deployed undeploys rather than launching, which is the refusal
+path, not a separate control.
 
 Still open, but now known NOT to be in the way: each Ready Area cell draws only
 ~160 of 2392 pixels (histogram: nine distinct palette indices, 2233 of them the
