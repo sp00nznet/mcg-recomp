@@ -120,6 +120,12 @@ static void note_callsite(uint32_t site, uint32_t target) {
 static uint32_t g_callstack[CALLSTACK_MAX];
 static uint32_t g_callstack_n;
 
+/* The Ready Area's scroll pane, remembered when the briefing screen shows it,
+ * so the watchdog can report its state live. Reading it inside setUpDeploy is
+ * too early: the show happens afterwards, which is how "visible=0" was
+ * mistaken for the bug once already. */
+static uint32_t g_ready_pane;
+
 /*
  * A watch on one simulated dword, checked at every call boundary.
  *
@@ -341,6 +347,42 @@ static DWORD WINAPI watchdog(LPVOID unused) {
         /* setUpDeploy only builds a Ready Area entry for a 'Mech whose
          * [+0xB4] is above -1 and whose [+0x78] is zero, so those two fields
          * decide whether the list draws anything at all. Walk the first few. */
+        /* The Ready Area pane as it stands right now: shown? how many
+         * children, and are THEY shown? */
+        char ready[160] = "";
+        if (g_ready_pane) {
+            uint32_t sp = g_ready_pane;
+            int kids = (int)MEM32(sp + 0x470u), off = 0;
+            off += snprintf(ready, sizeof ready, " pane vis=%d kids=%d",
+                            (int)MEM32(sp + 0x54u), kids);
+            for (int i = 0; i < kids && i < 6 && off < (int)sizeof ready - 32; i++) {
+                uint32_t kid = MEM32(sp + 0x74u + 4u * (uint32_t)i);
+                off += snprintf(ready + off, sizeof ready - off, " [%d/%d]",
+                                kid ? (int)MEM32(kid + 0x54u) : -1,
+                                kid ? (int)MEM32(kid + 0x50u) : -1);
+            }
+            /* And the decisive one: is anything actually PAINTED into the
+             * pane's own port? lObject::display composites that port onto the
+             * screen but only calls draw() when the object has an animation,
+             * so an empty port means the entries never rendered, while a full
+             * one means the composite is what is lost. */
+            {
+                uint32_t port = MEM32(sp + 0x4ACu);
+                uint32_t pane = port ? MEM32(port + 0x10u) : 0;
+                uint32_t win  = pane ? MEM32(pane) : 0;
+                size_t nz = 0, n = 0;
+                if (win) {
+                    uint32_t w = MEM32(win + 4) + 1, h = MEM32(win + 8) + 1;
+                    const uint8_t* px = (const uint8_t*)ADDR(MEM32(win));
+                    n = (size_t)w * h;
+                    /* setUpDeploy wipes this port to palette index 0x10 before
+                     * placing anything, so "non-zero" is every pixel. Count the
+                     * ones that are NOT the wipe colour -- those are drawing. */
+                    for (size_t k = 0; k < n; k++) if (px[k] != 0x10) nz++;
+                }
+                snprintf(ready + off, sizeof ready - off, " port %zu/%zu", nz, n);
+            }
+        }
         char mechs[128] = "";
         {
             uint32_t m = head;
@@ -354,14 +396,14 @@ static DWORD WINAPI watchdog(LPVOID unused) {
         }
         fprintf(stderr, "[watchdog] func=0x%08X pc=0x%08X depth=%u "
                 "peek=%u dispatch=%u wndproc=%u | state=%d movie=%d mode=%d "
-                "play=%d roster=%08X/%08X %08X/%08X mechs%s%s\n",
+                "play=%d roster=%08X/%08X mechs%s%s%s\n",
                 g_cur_func, pc, g_callstack_n,
                 g_n_peek, g_n_dispatch, g_n_wndproc,
                 mission ? (int)MEM32(mission) : -1,
                 mission ? (int)MEM32(mission + 0x14) : -1,
                 (int)MEM32(0x00808790u),
-                sys ? (int)MEM32(sys + 0xAECu) : -1, list, head, list2, head2,
-                mechs[0] ? mechs : " none",
+                sys ? (int)MEM32(sys + 0xAECu) : -1, list, head,
+                mechs[0] ? mechs : " none", ready,
                 same ? "  (PC unchanged)" : "");
         if (same) {
             uint32_t n = g_callstack_n < CALLSTACK_MAX
@@ -738,8 +780,40 @@ static void mcg_MechBriefBlock_init(void) {
     recomp_MechBriefBlock__init_006DD7C0();
 }
 
+/*
+ * Who shows what.
+ *
+ * BriefingScreen::ShowGUIWindow(show) forwards to the Ready Area's scroll pane
+ * at [this+0x5C0] unconditionally, so if that pane is hidden then either this
+ * never ran or the show did not stick. Both are virtual, so they are reachable
+ * through the dispatcher without withholding anything from the lifter.
+ */
+void recomp_aObject__ShowGUIWindow_0060A780(void);
+static void mcg_aObject_ShowGUIWindow(void) {
+    static int shown;
+    uint32_t self = g_ecx, arg = MEM32(g_esp + 4);
+    if (shown < 40) {
+        shown++;
+        fprintf(stderr, "[show] aObject %08X <- %d\n", self, (int)arg);
+    }
+    recomp_aObject__ShowGUIWindow_0060A780();
+}
+
+void recomp_BriefingScreen__ShowGUIWindow_006DCEF0(void);
+static void mcg_BriefingScreen_ShowGUIWindow(void) {
+    uint32_t self = g_ecx, arg = MEM32(g_esp + 4), sp = MEM32(self + 0x5C0u);
+    g_ready_pane = sp;
+    fprintf(stderr, "[show] BriefingScreen %08X <- %d (pane %08X)\n",
+            self, (int)arg, sp);
+    recomp_BriefingScreen__ShowGUIWindow_006DCEF0();
+    fprintf(stderr, "[show] ...pane visible now %d\n",
+            sp ? (int)MEM32(sp + 0x54u) : -1);
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     switch (va) {
+    case 0x0060A780u: return mcg_aObject_ShowGUIWindow;
+    case 0x006DCEF0u: return mcg_BriefingScreen_ShowGUIWindow;
     case 0x006DD410u: return mcg_setUpDeploy;
     case 0x006DD7C0u: return mcg_MechBriefBlock_init;
     case 0x00644250u: return mcg_Assert;       /* Assert    */
