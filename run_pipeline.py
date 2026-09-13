@@ -498,6 +498,28 @@ def main():
             hi = va + size_of[va]
             insns, _ = linear_disassemble(md, code_data, cs, va, hi)
             for ins in insns:
+                # A code address loaded as an IMMEDIATE is an entry too.
+                #
+                # AG_ellipse_fill picks one of two span writers with
+                # `mov ebx, 0x6b6c07` / `mov ebx, 0x6b6b5a`, stores it in a
+                # global and then `call dword ptr [0x8023d4]` -- into the middle
+                # of itself. Both targets are internal labels ending in their
+                # own `ret`, and no other source can see them: they are never
+                # the operand of a call or jump, and they are in code rather
+                # than in a data table. Unresolved, the indirect call did
+                # nothing, the routine's span globals were never advanced, and
+                # the span length came out as 0xFFFFFFFF -- which then ran the
+                # byte-write loop off the end of the surface. That was the first
+                # frame of the tactical map.
+                # Skipped for call/jump, whose immediate IS the branch target
+                # and is handled below -- a `continue` here would swallow that.
+                if not (ins.is_call or ins.is_jump):
+                    for op in ins.operands:
+                        if op.type != X86_OP_IMM:
+                            continue
+                        v = op.imm & 0xFFFFFFFF
+                        if cs <= v < ce and v not in known and is_boundary(v):
+                            found.add(v)
                 t = ins.get_branch_target()
                 if not t or not (cs <= t < ce) or t in known:
                     continue
