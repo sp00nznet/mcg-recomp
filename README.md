@@ -33,10 +33,10 @@ discovery heuristic in this repo because none is needed.
 | Phase | Status | Description |
 |-------|--------|-------------|
 | **Phase 0** | **Complete** | Binary triage, CodeView symbol recovery — **5,760 named functions, 98.7% of `.text`** |
-| **Phase 1** | **Complete** | x86 → C code generation — **all 5,760 functions, 0 lift errors**, 829K lines |
+| **Phase 1** | **Complete** | x86 → C code generation — **5,981 functions, 0 lift errors**, 829K lines |
 | **Phase 2** | **Complete** | Compilation — **13 objects, 0 errors, 0 warnings** (MSVC, `/W1`) |
 | **Phase 3** | **Complete** | Links and runs — **CRT startup completes, game code executes**, 204 import bridges |
-| Phase 4 | Next | Win32 + DirectX 6 HAL (DDraw / DSound / DPlay / DInput) |
+| **Phase 4** | **In progress** | Win32 + DirectX 6 HAL — **the game renders: title screen, menus, working mouse** |
 | Phase 5 | Pending | Engine abstraction — VFX rasteriser, terrain, sprite |
 | Phase 6 | Pending | Asset loading (FST / PAK / SHP / FIT) |
 | Phase 7+ | Pending | ABL script VM, logistics, mission layer, modern backend |
@@ -321,62 +321,99 @@ stack silently, whereas a null slot is reported by address.
 
 ### How far it gets
 
+It draws the game. The title screen, the main menu, and the screens behind it
+all render; the mouse cursor tracks and clicking a menu item navigates.
+
 ```
 [runtime] mapped MCX.EXE at 0x00600000, 2.1 MB
 [initterm] 5 constructors, 0 unbalanced
 [initterm] 26 constructors, 0 unbalanced      <- all of them, none unresolved
-          ... config parsed, no missing keys ...
-[import-stub] RegisterClassA
-[import-stub] SetRect
-[import-stub] CreateWindowExA                 <- and exits cleanly: no window yet
+[win] popup -> framed window, client 1280x1024
+[ddraw] SetDisplayMode2 1280x1024 8bpp
+[ddraw] CreateSurface 1280x1024 caps=00004218
+[watchdog] func=0x0061E2E0 pc=0x0061EC0C peek=8003 dispatch=17 wndproc=117
 ```
 
-CRT startup, every static constructor, the config parse, the media check, window
-creation, the whole DirectDraw init sequence and DirectSound creation all
-complete. The engine now stops in `SessionManager::EnumerateConnections`: its
-DirectPlay lobby member (`+0x13C`) is null, the engine's own `Assert` fires
-saying so, and it then dereferences it anyway. `DirectPlayLobbyCreateA` is never
-reached, so something earlier in session-manager setup gives up first — that is
-the next thread, and the engine's assertions now print, so it will say why.
+The call stack under the frame loop reads
+`WinMain -> RealWinMain -> aSystem::run -> aCallback::exec -> RunMission ->
+Mission::run`, so the engine is inside its own top-level state machine, not
+parked in startup. It runs for minutes without faulting.
 
-**The media check.** `checkForCDInDrive()` — the binary names it itself — walks
-`A:` to `Z:` for a drive reporting `DRIVE_CDROM`, then looks for
+**The media check.** `checkForCDInDrive()` -- the binary names it itself --
+walks `A:` to `Z:` for a drive reporting `DRIVE_CDROM`, then looks for
 `\data\tiles\gtiles90.pak` and `\hidden.txt` **from the drive root**, because in
 1999 the content was on a disc whose root *was* the data directory. Installed
 into a subfolder, those paths cannot resolve on any machine. The runtime answers
-the question it is really asking — where does the content live — by reporting
+the question it is really asking -- where does the content live -- by reporting
 the install drive as the media and retrying root-anchored paths under the
 install directory, and only when the result exists. Both files it wants are the
 game's own, already present. (`MCX.EXE` carries no DRM: Phase 0 found no packer
 and no protection indicators.)
 
+### Three bugs that stood between "it runs" and "it draws"
+
+**`int3` is padding, not a wall.** MSVC pads between basic blocks with `int3`,
+and the disassembler stopped at the first one. `handleEvent` lost everything
+past `0x611564` -- including both of its `ret`s -- so the lifted body fell out
+through the bottom without running its epilogue, never restored the caller's
+`ebp`, and the corruption cascaded all the way up to `aCallback::exec`. Fixing
+it eliminated every remaining ebp-clobber at once. The same pass also learned
+that a dense MSVC switch emits *two* tables: a byte index table read with
+`movzx r, byte [r+disp]`, then the dword target table the `jmp` uses. Only the
+second is reachable from the `jmp`, so the first was decoded as code -- and in
+`translateMessage` those bytes happen to disassemble to `popal`.
+
+**`WM_PAINT` must be validated.** Without a `ValidateRect`, the message is
+regenerated immediately and the engine spends every frame repainting instead of
+reaching `UpdateDisplay`. It looked like a hang; it was a paint storm.
+
+**Windowed cursor coordinates.** The engine believes it owns a fullscreen
+display and reads the pointer straight out of `GetCursorPos` in those
+coordinates. Windowed, a raw desktop point lands outside a screen that as far as
+the engine knows has no edges, so `DrawMouse`'s save-under width
+(`clipRight - x + 1`) went to -46, `shr ecx, 2` turned that into `0x3FFFFFF4`,
+and the `rep movsd` that saves the pixels under the cursor walked out of the
+arena. `GetCursorPos` now maps the point back through the client rect and the
+same scale `present()` uses; `ClipCursor` and `SetCursorPos` speak those
+fullscreen coordinates too, so both became no-ops rather than confining or
+warping the host pointer.
+
 ### Where it stops
 
 Open, and honestly open rather than fixed:
 
-- **A stack imbalance reaching the CRT's `WinMain` call**, which put the poison
-  value into `esi` — and since the CRT passes `esi` as `hPrevInstance`, the game
-  concluded another copy was running. `_initterm`'s constructor loop was the
-  prime suspect and has been **ruled out**: replacing `_initterm` with a native
-  probe that checks `esp` around every constructor reports *30 constructors, 0
-  unbalanced*. The `_strcpy` leak above was one real contributor; whether any
-  imbalance remains here is unmeasured, because the build defaults to
-  `RECOMP_RETADDR=0`, which makes a leak inert rather than visible. Rebuild with
-  `-DRECOMP_RETADDR=0xDEAD0000u` to put the canary back.
+- **Widget faces do not reach the screen.** The menu items are laid out
+  correctly -- a column at x=390, 31px apart, each with its picture loaded and
+  its own port painted in full -- and the destination pane `lObject::display`
+  composites into is right (`(390,152)-(564,179)` in a 1280x1024 window). But a
+  watchpoint on that pixel in both candidate framebuffers never fires: nothing
+  writes there. The three blitters underneath (`VFX_pane_wipe`,
+  `VFX_pane_copy`, `DrawTransparent`) are covered by self-tests and are all
+  correct, so the loss is above the blit layer -- the composite is not being
+  reached for these objects. That is the next thread.
+- **`Mission::run` re-enters `aSystem::resetDirectDraw`** every few seconds,
+  leaking a surface each time. `SetDisplayMode2` dumps its caller's stack on the
+  second call, which is how that was found; why the flag at `0x7AB0E4` stays set
+  is not yet known.
 - **Lifted `__sbh_alloc_block`** faults building a block footer from a local
   that holds a pointer where a size belongs. The runtime sets `___sbh_threshold`
-  to 0 — the CRT's own switch, what `_set_sbh_threshold()` writes — so
+  to 0 -- the CRT's own switch, what `_set_sbh_threshold()` writes -- so
   allocation goes to `HeapAlloc` instead. A supported MSVC 6 configuration, but
   a sidestep.
-- **x87 80-bit values.** `$I10_OUTPUT`/`__fltout` read an extended value's raw
-  bytes, and the lifter models the x87 stack as a 64-bit C `double`, so `%f`
-  cannot round-trip. The engine's two error reporters are overridden in
-  `recomp_lookup_manual()` to print their message and skip the float, because
-  the message is the point.
+- **x87 80-bit values.** MSVC 6's float paths keep values as 12-byte long
+  doubles and the lifter models the x87 stack as a 64-bit C `double`, so they
+  cannot round-trip. Two heads of that chain are replaced with native code in
+  `recomp_lookup_manual()`: `__fassign` (native `strtod`) and `__cfltcvt`
+  (native `snprintf`). The second was a crash, not a rounding difference --
+  `__output` reaches it through `[0x7A7150]` for every `%e/%f/%g`, the lifted
+  body came back with the caller's `ebp` gone, and `__output` then read its own
+  locals through a null frame pointer. The first menu that formatted a number
+  died there.
 
 Ruled out, so as not to be retried: the environment block (the host's real one
-is passed through now) and `GetTimeZoneInformation` leaving its struct stale
-(implemented now). Neither was the cause of anything.
+is passed through now), `GetTimeZoneInformation` leaving its struct stale
+(implemented now), `_initterm` over-popping (30 constructors, 0 unbalanced), and
+the three blitters above. None was the cause of anything.
 
 ## Layout
 

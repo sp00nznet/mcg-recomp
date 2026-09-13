@@ -249,49 +249,71 @@ run. Add a case whenever a primitive is suspected: it is cheap, and it converts
   run_pipeline.py is for.
 
 ### Current bring-up stop
-### Bring-up diagnostics available (trace builds)
-- `--selftest` -- lifted CRT string primitives AND `FitIniFile::textToLong`
-  (the engine's own number parser, hex and decimal) against the host's answers.
-- On a fault the report now prints: the faulting instruction VA, the window-proc
-  depth, a hex dump around ecx/esi/edi, and a ring of the last 32 **call sites**
-  (`site -> callee`, direct and indirect). The call-site ring is what identifies
-  a caller when an object arrives at a virtual method already wrong -- the
-  function-entry trace only says what ran, not who called it.
+The game renders. Title screen, main menu and the screens behind it all draw,
+the mouse cursor tracks the pointer, and clicking a menu item navigates. The
+frame loop runs for minutes without faulting, under
+`WinMain -> RealWinMain -> aSystem::run -> aCallback::exec -> RunMission ->
+Mission::run`.
 
-### The lObject::draw object: what it is, and what it is NOT
-The pointer is NOT an unconstructed object -- its memory reads
-`FF FF 10 10 10 10 10 10 ...`, a run of palette index 0x10, i.e. it points into
-**art data**. `lButton::draw` runs on it without faulting (it only reads garbage
-fields); the fault comes when `lObject::draw` dereferences the vtable.
-The chain is `MCSplashScreen::init` (0x006E4D90) -> ... -> `lButton::draw`
-(+0xe3, +0xeb) -> `lObject::draw`. init itself wires buttons correctly: the
-virtual call at init+0x710 through `[esi]` reaches `lButton::callback`, so esi
-is a valid object there.
+What is still wrong: **widget faces never reach the screen**. The menu items are
+laid out correctly -- a column at `x=390`, 31px apart, each with its picture
+loaded and its own port painted in full -- and the destination pane
+`lObject::display` composites into is right, `(390,152)-(564,179)` in a
+1280x1024 window. But `MCG_WATCH` on that pixel in both candidate framebuffers
+(the engine's `CreateDIBSection` bits and the DirectDraw surface) never fires:
+nothing writes there. So the composite is not being reached for these objects.
+`lObject::display` (0x00710E20) IS called ~21k times a run, but never with one
+of these objects -- find out who is meant to call it and does not.
+
+Also open: `Mission::run` re-enters `aSystem::resetDirectDraw` every few
+seconds, leaking a surface each time. `SetDisplayMode2` dumps its caller's stack
+on the second call, which is how that was found; the flag at `0x7AB0E4` staying
+set is unexplained.
+
+### Bring-up diagnostics available (trace builds)
+- `--selftest` -- lifted CRT string primitives, `FitIniFile::textToLong` (the
+  engine's own number parser, hex and decimal), the printf float path
+  (`sprintf` end to end, which needs `_cfltcvt_init` called first or it exits
+  with R6002), and the three VFX blitters: `VFX_pane_wipe`, `VFX_pane_copy`,
+  `DrawTransparent`. 22 cases, all passing.
+- `MCG_WATCHDOG=1` -- a thread that prints, every 3s, the running lifted
+  function, the instruction, the shadow call depth and the peek/dispatch/wndproc
+  counters. "PC unchanged" plus a flat peek count is a hang; "PC unchanged" with
+  peek climbing is just a hot function.
+- `MCG_WATCH=0xADDR` -- polls one simulated dword at every call boundary and
+  names the call site it changed across. Also useful inverted: a watch that
+  never fires proves nothing writes that address.
+- On a fault the report prints the faulting instruction VA, the window-proc
+  depth, a hex dump around ecx/esi/edi, and a ring of the last 32 **call sites**
+  (`site -> callee`). The ring is what identifies a caller when an object
+  arrives at a virtual method already wrong.
+- `recomp_dump_callstack()` -- the same shadow-stack walk, callable from a shim
+  when you want to know who asked for something.
 
 **Disproven, do not retry:**
-1. `FitIniFile::textToLong` returning bad counts -- all six selftest cases pass,
-   decimal and hex (the hex path exercises `strstr` + the `repne scasb` idiom).
-2. "No Digital Sound Hardware Installed" -- `waveOutGetNumDevs` reports 1 now,
-   the message is gone, the fault is unchanged.
-3. Window-procedure re-entrancy drawing a half-built screen -- the crash report
-   prints `window-proc depth: 0`, so it is the engine's own flow.
+1. `FitIniFile::textToLong` returning bad counts -- all six selftest cases pass.
+2. "No Digital Sound Hardware Installed" -- `waveOutGetNumDevs` reports 1 now.
+3. Window-procedure re-entrancy -- the crash report prints `window-proc depth: 0`.
+4. `_initterm` over-popping -- 30 constructors, 0 unbalanced.
+5. The three VFX blitters -- self-tested at unaligned widths and with the
+   destination pane off the origin, which is how the real callers use them.
+6. Missing art: every `data\art\*.tga` and `data\fonts\*.fnt` miss in the log is
+   the engine probing for a loose file before falling back to the packfile. The
+   `.FST` archives all open.
 
-**`lObject::draw`** (`lport.obj`, 0x00710D80 +0x7c) makes a C++ virtual call
-`call [eax + 0xd4]` where the vtable pointer read from the object is
-`0x1010FFFF` -- garbage -- and a nearby register holds `0x1E1E1E1E`, a fill
-pattern. So a logistics UI object is being drawn before anything constructed it.
-That is the logistics/menu layer, i.e. the last thing between here and a menu.
-
-Everything before it now completes: CRT startup, all static constructors, the
-config parse, the media check, window creation, the full DirectDraw init
-sequence (a frame composites), DirectSound, DirectPlay via COM, and the
-registry. **Ruled out as the cause:** the "No Digital Sound Hardware Installed"
-path -- `waveOutGetNumDevs` reports 1 now and the message is gone, but the fault
-is unchanged.
+**The lObject::draw garbage vtable (0x1010FFFF) is FIXED** -- it was the `int3`
+truncation, not an unconstructed object. MSVC pads between basic blocks with
+`int3` and the disassembler stopped at the first one, so `handleEvent` lost both
+of its `ret`s, fell out through the bottom without running its epilogue, and
+never restored the caller's `ebp`. `int3` is now skipped, not a stop, in both
+`linear_disassemble` and the trim loop. The same pass also learned that a dense
+MSVC switch emits two tables -- a byte index table read via
+`movzx r, byte [r+disp]` and the dword target table the `jmp` uses -- and only
+the second is reachable from the `jmp`, so the first was decoded as code.
 
 **The media check, for reference.** `checkForCDInDrive()` (0x00758DA0,
 `HonorB.obj`) walks A: to Z: for a `DRIVE_CDROM`, then looks for
-`\data\tiles\gtiles90.pak` and `\hidden.txt` **from the drive root** — a 1999
+`\data\tiles\gtiles90.pak` and `\hidden.txt` **from the drive root** -- a 1999
 CD's root *was* the data directory, so installed in a subfolder those paths can
 never resolve. The runtime reports the install drive as the media and retries
 root-anchored paths under the install directory, only when the result exists
