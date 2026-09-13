@@ -389,15 +389,25 @@ static DWORD WINAPI watchdog(LPVOID unused) {
                     uint32_t w = MEM32(win + 4) + 1;
                     const uint8_t* px = (const uint8_t*)ADDR(MEM32(win));
                     if (!dumped) {
+                        /* A histogram, not a mask. Printing "is it the wipe
+                         * colour" conflates "nothing was drawn here" with
+                         * "something was drawn IN that colour", and those are
+                         * opposite conclusions. Distinct indices is the
+                         * question: two means blank, dozens means drawn. */
+                        unsigned hist[256] = {0};
+                        int distinct = 0;
                         dumped = 1;
-                        fprintf(stderr, "[deploy] first entry cell:\n");
-                        for (int yy = 0; yy < 46; yy++) {
-                            fprintf(stderr, "      ");
+                        for (int yy = 0; yy < 46; yy++)
                             for (int xx = 0; xx < 52; xx++)
-                                fputc(px[(size_t)(yy + 3) * w + (xx + 4)] == 0x10
-                                      ? '.' : '#', stderr);
-                            fputc('\n', stderr);
-                        }
+                                hist[px[(size_t)(yy + 3) * w + (xx + 4)]]++;
+                        fprintf(stderr, "[deploy] first entry cell, by index:");
+                        for (int v = 0; v < 256; v++)
+                            if (hist[v]) {
+                                distinct++;
+                                if (distinct <= 12)
+                                    fprintf(stderr, " %02X:%u", v, hist[v]);
+                            }
+                        fprintf(stderr, "  (%d distinct)\n", distinct);
                     }
                 }
             }
@@ -774,6 +784,10 @@ static void mcg_setUpDeploy(void) {
     }
 }
 
+/* Set while a Ready Area entry is being built, so the copyTo report can show
+ * only the blits that make up one cell instead of every blit in the game. */
+static int g_in_block_init;
+
 /* MechBriefBlock::init(LogMech*, lObject* parent, long x, long y) -- the
  * position each Ready Area entry is placed at, inside the scroll pane's port. */
 void recomp_MechBriefBlock__init_006DD7C0(void);
@@ -781,6 +795,7 @@ static void mcg_MechBriefBlock_init(void) {
     static int shown;
     uint32_t self = g_ecx, mech = MEM32(g_esp + 4), parent = MEM32(g_esp + 8);
     int x = (int)MEM32(g_esp + 12), y = (int)MEM32(g_esp + 16);
+    g_in_block_init = 1;
     if (shown < 8) {
         shown++;
         /* The entries are placed into the scroll pane's own offscreen port.
@@ -797,6 +812,7 @@ static void mcg_MechBriefBlock_init(void) {
                 win ? (int)MEM32(win + 4) + 1 : -1, win ? (int)MEM32(win + 8) + 1 : -1);
     }
     recomp_MechBriefBlock__init_006DD7C0();
+    g_in_block_init = 0;
 }
 
 /*
@@ -861,8 +877,50 @@ static void mcg_lPort_init_named(void) {
     }
 }
 
+/*
+ * aPort::copyTo(dstPane, x, y, flag) -- every blit that builds one cell.
+ *
+ * Reported only while a Ready Area entry is under construction. drawBackground
+ * assembles the cell through a chain of temporary ports, so the question is
+ * which link in that chain loses the picture: each line gives the source's
+ * size, the destination rectangle it is aimed at, the offset and the
+ * transparency flag, and how many destination bytes actually changed.
+ */
+void recomp_aPort__copyTo_0060CB40(void);
+static void mcg_aPort_copyTo(void) {
+    static int shown;
+    uint32_t self = g_ecx, dpane = MEM32(g_esp + 4);
+    int x = (int)MEM32(g_esp + 8), y = (int)MEM32(g_esp + 12);
+    int flag = (int)MEM32(g_esp + 16);
+    int report = g_in_block_init && shown < 20;
+    uint32_t spane = MEM32(self + 0x10u), swin = spane ? MEM32(spane) : 0;
+    uint32_t dwin = dpane ? MEM32(dpane) : 0;
+    size_t before = 0, after = 0, dn = 0;
+    const uint8_t* dp = NULL;
+
+    if (report && dwin) {
+        uint32_t w = MEM32(dwin + 4) + 1, h = MEM32(dwin + 8) + 1;
+        dp = (const uint8_t*)ADDR(MEM32(dwin));
+        dn = (size_t)w * h;
+        for (size_t k = 0; k < dn; k++) before += dp[k];
+    }
+    recomp_aPort__copyTo_0060CB40();
+    if (report) {
+        if (dp) for (size_t k = 0; k < dn; k++) after += dp[k];
+        shown++;
+        fprintf(stderr, "[blit] src %dx%d -> pane (%d,%d)-(%d,%d) at (%d,%d) "
+                "flag=%d  %s\n",
+                swin ? (int)MEM32(swin + 4) + 1 : -1,
+                swin ? (int)MEM32(swin + 8) + 1 : -1,
+                dpane ? (int)MEM32(dpane + 4) : -1, dpane ? (int)MEM32(dpane + 8) : -1,
+                dpane ? (int)MEM32(dpane + 12) : -1, dpane ? (int)MEM32(dpane + 16) : -1,
+                x, y, flag, before == after ? "NOTHING CHANGED" : "wrote");
+    }
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     switch (va) {
+    case 0x0060CB40u: return mcg_aPort_copyTo;
     case 0x007106D0u: return mcg_lPort_init_named;
     case 0x0060A780u: return mcg_aObject_ShowGUIWindow;
     case 0x006DCEF0u: return mcg_BriefingScreen_ShowGUIWindow;

@@ -89,6 +89,7 @@ OVERRIDES = {
     0x006DD410: 'BriefingScreen::setUpDeploy -- report what the Ready Area got',
     0x006DD7C0: 'MechBriefBlock::init -- report where each Ready Area entry lands',
     0x007106D0: 'lPort::init(char*) -- report whether art actually loads',
+    0x0060CB40: 'aPort::copyTo -- report every blit that builds a Ready Area cell',
 }
 
 
