@@ -19,6 +19,7 @@
 analysis/*.exe
 analysis/*.dll
 src/recomp/gen/
+src/runtime/imports_gen.c
 build/
 __pycache__/
 *.pyc
@@ -35,3 +36,6 @@ __pycache__/
 
 Thumbs.db
 .DS_Store
+
+# Bring-up build trees
+build-trace/

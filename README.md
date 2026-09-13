@@ -35,8 +35,8 @@ discovery heuristic in this repo because none is needed.
 | **Phase 0** | **Complete** | Binary triage, CodeView symbol recovery — **5,760 named functions, 98.7% of `.text`** |
 | **Phase 1** | **Complete** | x86 → C code generation — **all 5,760 functions, 0 lift errors**, 829K lines |
 | **Phase 2** | **Complete** | Compilation — **13 objects, 0 errors, 0 warnings** (MSVC, `/W1`) |
-| Phase 3 | Next | Executable link: register/memory model, CRT init, import bridges |
-| Phase 4 | Pending | Win32 + DirectX 6 HAL (DDraw / DSound / DPlay / DInput) |
+| **Phase 3** | **Complete** | Links and runs — **CRT startup completes, game code executes**, 204 import bridges |
+| Phase 4 | Next | Win32 + DirectX 6 HAL (DDraw / DSound / DPlay / DInput) |
 | Phase 5 | Pending | Engine abstraction — VFX rasteriser, terrain, sprite |
 | Phase 6 | Pending | Asset loading (FST / PAK / SHP / FIT) |
 | Phase 7+ | Pending | ABL script VM, logistics, mission layer, modern backend |
@@ -167,6 +167,85 @@ rotate emitter already masked correctly), with four new cases in the toolbox's
 differential harness, which runs the lifted C against Unicorn and compares every
 register and flag: **74/78 match hardware, 0 failures**, the 4 remaining being
 pre-existing documented divergences.
+
+## Phase 3: it links, and it runs
+
+```
+py -3.11 gen_imports.py                      # -> src/runtime/imports_gen.c
+cmake -S . -B build -G Ninja && cmake --build build
+./build/mcg_recomp MCX.EXE
+```
+
+The CRT startup now runs to completion and the game's own code executes:
+
+```
+[runtime] mapped MCX.EXE at 0x00600000, 2.1 MB
+[runtime] stack 0x00820000-0x00C20000
+[shims]   heap arena 0x00C20000-0x10C20000
+[runtime] 5878 lifted functions, 204 import bridges
+[runtime] entering at 0x00762C24
+          ... CRT init, heap, locale, argv/environ ...
+[shims]   LoadLibraryA(".\IMAGEHLP.DLL") -> exports shimmed
+```
+
+### Argument counts are derived from three sources, never typed
+
+Every shim has to pop exactly what the real API pops; a wrong count silently
+desynchronises the simulated stack and the symptom appears nowhere near the
+cause. `gen_imports.py` resolves all 204 imports without a single hand-written
+number, from three independent places — and where two of them both have an
+answer, it **checks them against each other** and fails on a disagreement:
+
+| Source | Covers | |
+|--------|-------:|---|
+| Windows SDK 32-bit import libraries (`_Name@N`) | 192 | via pcrecomp's `stdcall_argc.py` |
+| MCX.EXE's **own** CodeView thunk symbols | 193 | `_DirectPlayLobbyCreateA@20` → 5 args, stated by the linker that built the game |
+| The import table's own names | 10 | `smackw32!_SmackOpen@12` — a DLL the SDK never heard of |
+| Undecorated thunk symbol ⇒ cdecl | 1 | `_wsprintfA` is varargs: the caller cleans up, so the shim pops nothing |
+
+192 were confirmed by two sources at once with **zero disagreements**. The same
+machinery covers the 307 `imagehlp.dll` exports the game resolves at runtime
+through `GetProcAddress`, which never appear in the import table at all.
+
+### What bring-up found
+
+- **`VirtualAlloc`'s alignment is part of its contract.** With `lpAddress` NULL
+  the real API only ever returns 64 KB-granular addresses, and the MSVC 6
+  small-block heap recovers a region from a block pointer by masking low bits.
+  Handing it a 16-byte-aligned bump pointer made those masks yield a base that
+  was itself an absolute address, and the first write through it landed 12 MB
+  outside anything allocated.
+- **A stub returning 0 is not neutral** — the house rule, earned again twice
+  here. `RegOpenKeyExA` returning 0 is `ERROR_SUCCESS`, so six registry stubs
+  each claimed to open a key and left the caller's `HKEY` stale. The registry is
+  now forwarded to the host's, because that is where the settings really live.
+- **The game requires `imagehlp.dll`** for its own crash reporter and calls a
+  failed load a fatal exception, quitting before its main loop. It resolves
+  symbols in a batch and gives up on the first one missing, so shims are
+  generated for every export rather than for the names we happened to hit.
+- **Every crash report names its instruction.** Generated code records the VA it
+  is about to execute (free without `-DRECOMP_TRACE`), which turned "somewhere
+  in this 777-byte function" into an exact address, twice.
+
+### Where it stops
+
+In the game's **own** error path: `FatalMsg()` from `L:\mcx\Lib\aError.cpp`
+calls `sprintf` with a destination pointer of `0x0015xxxx`, below the image, and
+the fault is `sprintf` writing its NUL terminator. So the engine started, decided
+something was wrong, and crashed while formatting the message that would have
+said what. Finding where that buffer comes from is the next step — and the
+message itself is the prize, since it is the game explaining what it needs.
+
+Ruled out already, so as not to be retried: the environment block (the host's
+real one is now passed through) and `GetTimeZoneInformation` leaving its struct
+stale (now implemented). Neither changed the fault.
+
+Also unresolved rather than fixed: lifted `__sbh_alloc_block` faults building a
+block footer from a local that holds a pointer where a size belongs. The runtime
+sets `___sbh_threshold` to 0 — the CRT's own switch, what `_set_sbh_threshold()`
+writes — so every allocation goes to `HeapAlloc` instead. That is a supported
+MSVC 6 configuration, not a patch to the game, but the SBH path is a sidestep
+and stays on the open list.
 
 ## Layout
 

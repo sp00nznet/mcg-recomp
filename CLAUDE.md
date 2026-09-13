@@ -68,6 +68,50 @@ FST archives, PAK archives, LZ decompression, FIT config files, VFX shape tables
 (`.SHP`), 256-colour palettes. Open there: the mech sprite row encoding (a long
 investigation that did not land) and ABL.
 
+## Phase 3 (done) — links, runs, CRT completes, game code executes
+- Layout: image `0x00600000` (+2.1 MB), stack `0x00820000-0x00C20000` (4 MB),
+  heap arena `0x00C20000-0x10C20000` (256 MB reserved, committed on demand).
+  Synthetic VAs for `GetProcAddress` results live at `0x11000000+`, deliberately
+  above everything mapped so a stray one is unmistakable.
+- **`gen_imports.py` derives every argument count from three sources and makes
+  them agree**: the SDK import libs (192), MCX.EXE's own decorated CodeView
+  thunk symbols (193), and the import table's own names for smackw32 (10).
+  192 are confirmed by two sources with zero disagreements. An undecorated thunk
+  symbol is positive evidence of cdecl — that is `_wsprintfA`, varargs, pops 0.
+  It also verifies every hand-written shim's STDRET on each run. **Never
+  hand-tune a STDRET.**
+- **`VirtualAlloc` must return 64 KB-aligned addresses.** The real one always
+  does, and the MSVC 6 small-block heap masks low bits off a block pointer to
+  find its region. A 16-byte-aligned bump pointer made that arithmetic produce
+  base+base and the write landed 12 MB out.
+- **`___sbh_threshold` (`0x007A714C`, ships as `0x3F8`) is set to 0 at startup**
+  so every allocation goes to HeapAlloc instead of the CRT small-block heap.
+  This is the CRT's own switch (`_set_sbh_threshold`), a supported config — but
+  it SIDESTEPS an unexplained fault in lifted `__sbh_alloc_block`, where a local
+  holds a pointer where a size belongs. The lift of the faulting instruction and
+  the flag model around it are both faithful. Open.
+- **The game needs `imagehlp.dll`**: `LoadLibraryA(".\IMAGEHLP.DLL")` then a
+  batch of `GetProcAddress`; a failure of either is a fatal exception and it
+  quits before its main loop. Shims are generated for ALL 307 SDK-known exports
+  (argc derived), not a hand-list — it gives up on the first missing name.
+- **A stub returning 0 is not neutral**, hit twice: `ERROR_SUCCESS` is 0, so the
+  Reg* stubs "succeeded" and left the out `HKEY` stale; and struct-filling APIs
+  (`GetTimeZoneInformation`, `GetSystemInfo`, …) left the caller's struct
+  uninitialised. Registry and those structs now forward to the host.
+- **Generated code records its PC** (`RECOMP_PC`, free without `-DRECOMP_TRACE`)
+  so a crash report names the faulting instruction, not just the function. Build
+  `build-trace/` with `-DCMAKE_C_FLAGS=-DRECOMP_TRACE` for that plus a 1024-deep
+  function-entry backtrace. It found both faults above in one run each.
+
+### Current bring-up stop
+`FatalMsg()` (`L:\mcx\Lib\aError.cpp`, 0x006440D0) calls `sprintf` with a
+destination of `0x0015xxxx` — below the image — and `sprintf` faults writing its
+NUL terminator at `0x0075F9AE`. The engine started, decided something was wrong,
+and crashed formatting the message that would say what. **Disproven, do not
+retry:** (1) the environment block being empty — the host's real one is passed
+through now; (2) `GetTimeZoneInformation` leaving its struct stale — implemented
+now. Neither changed the fault.
+
 ## Phase 1/2 (done)
 - `run_pipeline.py` drives the shared lifter: **5,760/5,760 functions, 0 lift
   errors**, 829,128 lines across 12 files. Compiles to **13 objects, 0 errors,

@@ -50,6 +50,8 @@ def c_name(entry):
     """
     sym = entry['name']
     addr = entry['address_int']
+    if not sym:                      # discovered by call-graph, no symbol
+        return f'sub_{addr:08X}'
     if sym.startswith('?'):
         parts = sym[1:].split('@')
         method = parts[0]
@@ -122,13 +124,18 @@ def lift_function(lifter, name, insns, leaders):
     # blocks that all address it through the same ebp. Declaring them locally
     # here -- which is what an older driver did -- silently zeroes the frame
     # pointer at the top of every such block.
-    lines = [f'void {name}(void) {{']
+    lines = [f'void recomp_{name}(void) {{']
     lines += [f'    {d}' for d in FUNCTION_LOCALS]
+    # Records which lifted function is running, so a crash report names it
+    # instead of saying sub_00000000. Free unless -DRECOMP_TRACE, which also
+    # keeps the last 1024 entries as a backtrace.
+    lines.append(f'    RECOMP_ENTER(0x{insns[0].address:08X}u);' if insns else '')
     lines.append('')
     lifter._flag_state = None
     for insn in insns:
         if insn.address in leaders:
             lines.append(f'L_{insn.address:08X}:')
+        lines.append(f'    RECOMP_PC(0x{insn.address:08X}u);')
         for line in lifter.lift_instruction(insn):
             lines.append(f'    {line}')
     if insns and not insns[-1].is_ret:
@@ -154,7 +161,16 @@ def write_chunk(out, idx, chunk):
         f.write('/* MechCommander Gold recompilation - generated - DO NOT EDIT */\n')
         f.write(f'/* File {idx}: {len(chunk)} functions */\n\n')
         f.write('#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n')
-        f.write('#include "recomp_funcs.h"\n#include <math.h>\n#include <string.h>\n\n')
+        f.write('#include "recomp_funcs.h"\n#include <math.h>\n#include <string.h>\n')
+        # Under RECOMP_TRACE every instruction records its own VA, so a crash
+        # report names the faulting instruction and not just the function.
+        # Compiles to nothing otherwise.
+        f.write('#ifdef RECOMP_TRACE\n'
+                'extern uint32_t g_cur_pc;\n'
+                '#define RECOMP_PC(va) (g_cur_pc = (va))\n'
+                '#else\n'
+                '#define RECOMP_PC(va) ((void)0)\n'
+                '#endif\n\n')
         for code, entry, name in chunk:
             sig = entry.get('demangled') or entry['name']
             mod = (entry.get('module') or '?').replace('.\\relnodbg\\', '')
@@ -184,15 +200,75 @@ def main():
 
     with open(os.path.join(_here, 'config', 'functions.json'), encoding='utf-8') as fh:
         table = json.load(fh)
-    entries = sorted((e for e in table if cs <= e['address_int'] < ce),
-                     key=lambda e: e['address_int'])
-    exact = sum(1 for e in entries if e['exact_size'])
-    print(f'[*] {len(entries)} functions from the CodeView table '
-          f'({exact} with an exact size)')
+    with open(os.path.join(_here, 'analysis', 'fpo.json'), encoding='utf-8') as fh:
+        fpo = json.load(fh)
+
+    # Start from the CodeView publics, then add what a public symbol table
+    # cannot see. `static` functions have no public symbol at all, and this
+    # binary has thousands of them -- they showed up as direct call targets with
+    # no definition. Two sources close the gap: FPO records, which describe a
+    # frame regardless of linkage, and the call graph itself.
+    def synth(va):
+        return {'address': f'0x{va:08X}', 'address_int': va, 'name': '',
+                'demangled': None, 'module': None, 'source': None}
+
+    known = {e['address_int']: e for e in table if cs <= e['address_int'] < ce}
+    exact_size = {e['address_int']: e['size'] for e in table if e['exact_size']}
+    from_syms = len(known)
+    for f in fpo:
+        va = info.image_base + f['rva']
+        if cs <= va < ce:
+            exact_size.setdefault(va, f['size'])
+            known.setdefault(va, synth(va))
+    from_fpo = len(known) - from_syms
 
     md = Cs(CS_ARCH_X86, CS_MODE_32)
     md.detail = True
-    lifter = Lifter(iat_map=iat)
+
+    def bounds(order):
+        """Each entry runs to the next one, or to its exact size if it has a
+        smaller one. Bounds only ever shrink, so they cannot overlap -- and a
+        newly discovered entry correctly shortens whatever preceded it."""
+        out = {}
+        for i, va in enumerate(order):
+            nxt = order[i + 1] if i + 1 < len(order) else ce
+            out[va] = min(exact_size.get(va, nxt - va), nxt - va)
+        return out
+
+    # Only `call` targets seed discovery. A jump target is not reliably a
+    # function entry -- an intra-function branch and a tail call look identical
+    # here -- and a false entry would split a real function in half.
+    for rnd in range(1, 9):
+        order = sorted(known)
+        size_of = bounds(order)
+        found = set()
+        for va in order:
+            insns, _ = linear_disassemble(md, code_data, cs, va, va + size_of[va])
+            for ins in insns:
+                if not ins.is_call:
+                    continue
+                t = ins.get_branch_target()
+                if t and cs <= t < ce and t not in known:
+                    found.add(t)
+        if not found:
+            break
+        for va in found:
+            known[va] = synth(va)
+        print(f'[*]   discovery round {rnd}: +{len(found)} static functions',
+              flush=True)
+
+    order = sorted(known)
+    size_of = bounds(order)
+    print(f'[*] {len(order)} functions: {from_syms} CodeView publics, '
+          f'+{from_fpo} FPO-only, '
+          f'+{len(order) - from_syms - from_fpo} statics via the call graph')
+
+    entries = [dict(known[va], size=size_of[va]) for va in order]
+    # Telling the lifter the names means a direct call emits the real symbol;
+    # telling it which VAs exist means a call to anything else degrades to a
+    # logged indirect call instead of an unresolved external at link time.
+    names = {va: c_name(known[va]) for va in order}
+    lifter = Lifter(iat_map=iat, func_names=names, lifted=set(order))
 
     all_entries, stats, chunk = [], [], []
     errors = idx = 0
@@ -229,7 +305,7 @@ def main():
                           'symbol': e['name'], 'module': e.get('module'),
                           'num_instructions': len(trimmed)})
         except Exception as exc:                            # noqa: BLE001
-            code = f'/* LIFT ERROR {name}: {exc} */\nvoid {name}(void) {{}}\n'
+            code = f'/* LIFT ERROR {name}: {exc} */\nvoid recomp_{name}(void) {{}}\n'
             errors += 1
         chunk.append((code, e, name))
         all_entries.append((addr, name))
@@ -246,14 +322,14 @@ def main():
         f.write('/* MechCommander Gold recompilation - generated */\n'
                 '#pragma once\n#include <stdint.h>\n\n')
         for a, n in all_entries:
-            f.write(f'void {n}(void);  /* 0x{a:08X} */\n')
+            f.write(f'void recomp_{n}(void);  /* 0x{a:08X} */\n')
 
     with open(os.path.join(out, 'recomp_dispatch.c'), 'w', encoding='utf-8') as f:
         f.write('/* MechCommander Gold recompilation - generated */\n'
                 '#include "recomp_types.h"\n#include "recomp_funcs.h"\n\n')
         f.write('const recomp_dispatch_entry_t recomp_dispatch_table[] = {\n')
         for a, n in sorted(all_entries):
-            f.write(f'    {{ 0x{a:08X}u, {n} }},\n')
+            f.write(f'    {{ 0x{a:08X}u, recomp_{n} }},\n')
         f.write('};\n\n'
                 f'const uint32_t recomp_dispatch_count = {len(all_entries)};\n')
 
