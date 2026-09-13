@@ -512,10 +512,10 @@ static void dd2_SetDisplayMode(void) {
     fprintf(stderr, "[ddraw] SetDisplayMode2 %ux%u %ubpp\n",
             g_mode_w, g_mode_h, g_mode_bpp);
     if (g_hwnd) {
-        RECT r = { 0, 0, (LONG)g_mode_w, (LONG)g_mode_h };
-        AdjustWindowRect(&r, (DWORD)GetWindowLongA(g_hwnd, GWL_STYLE), FALSE);
-        SetWindowPos(g_hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top,
-                     SWP_NOMOVE | SWP_NOZORDER);
+        /* The window keeps whatever size it was created at -- resizing it to
+         * the mode would put the desktop-covering geometry straight back.
+         * present() StretchBlts when the client and the surface differ, so the
+         * engine still renders at its own resolution either way. */
         ShowWindow(g_hwnd, SW_SHOW);
         SetForegroundWindow(g_hwnd);       /* see the note on the DD1 version */
         SetActiveWindow(g_hwnd);
@@ -572,10 +572,10 @@ static void dd_SetDisplayMode(void) {
     /* Run windowed at the requested size: a real mode switch is neither
      * possible nor wanted here, and the window is ours to resize. */
     if (g_hwnd) {
-        RECT r = { 0, 0, (LONG)g_mode_w, (LONG)g_mode_h };
-        AdjustWindowRect(&r, (DWORD)GetWindowLongA(g_hwnd, GWL_STYLE), FALSE);
-        SetWindowPos(g_hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top,
-                     SWP_NOMOVE | SWP_NOZORDER);
+        /* The window keeps whatever size it was created at -- resizing it to
+         * the mode would put the desktop-covering geometry straight back.
+         * present() StretchBlts when the client and the surface differ, so the
+         * engine still renders at its own resolution either way. */
         ShowWindow(g_hwnd, SW_SHOW);
         /* And bring it to the front. aSystem::run blocks in WaitMessage
          * whenever the engine considers itself inactive, so a window created

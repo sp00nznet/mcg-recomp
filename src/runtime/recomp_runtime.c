@@ -280,6 +280,45 @@ static void dump_around(const char* what, uint32_t va) {
     }
 }
 
+/*
+ * A watchdog thread.
+ *
+ * "It stopped doing anything" is not a crash, so nothing reports it. This
+ * prints where the engine is every few seconds: the running lifted function,
+ * the instruction, and the top of the shadow call stack. It only READS globals
+ * the main thread owns -- it never enters lifted code, because the register
+ * file and stack are global and a second thread inside them would corrupt the
+ * first.
+ */
+static DWORD WINAPI watchdog(LPVOID unused) {
+    (void)unused;
+    uint32_t last_pc = 0;
+    int same = 0;
+    for (;;) {
+        Sleep(3000);
+        uint32_t pc = g_cur_pc;
+        same = (pc == last_pc) ? same + 1 : 0;
+        last_pc = pc;
+        fprintf(stderr, "[watchdog] func=0x%08X pc=0x%08X depth=%u%s\n",
+                g_cur_func, pc, g_callstack_n,
+                same ? "  (unchanged -- blocked here)" : "");
+        if (same) {
+            uint32_t n = g_callstack_n < CALLSTACK_MAX
+                       ? g_callstack_n : CALLSTACK_MAX;
+            uint32_t from = n > 8 ? n - 8 : 0;
+            for (uint32_t i = from; i < n; i++)
+                fprintf(stderr, "[watchdog]   called from 0x%08X\n",
+                        g_callstack[i]);
+        }
+        fflush(stderr);
+    }
+}
+
+static void start_watchdog(void) {
+    if (getenv("MCG_WATCHDOG"))
+        CreateThread(NULL, 0, watchdog, NULL, 0, NULL);
+}
+
 /* Everything worth printing when something faults, in one place. */
 static void report_extra(void) {
     /* Non-zero means the engine was re-entered through the window procedure --
@@ -795,6 +834,7 @@ int main(int argc, char** argv) {
             return crt_selftest();
 
     watch_init();
+    start_watchdog();
     fprintf(stderr, "[runtime] entering at 0x%08X\n", MCG_ENTRY);
     PUSH32(g_esp, RECOMP_RETADDR);
     entry();

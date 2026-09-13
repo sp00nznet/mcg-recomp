@@ -781,7 +781,15 @@ void imp_GetTickCount(void)  { RET(GetTickCount()); STDRET(0); }
 void imp_timeGetTime(void)   { RET(GetTickCount()); STDRET(0); }
 void imp_timeBeginPeriod(void) { RET(0); STDRET(1); }
 void imp_timeEndPeriod(void)   { RET(0); STDRET(1); }
-void imp_Sleep(void)         { Sleep(ARG(0)); STDRET(1); }
+void imp_Sleep(void) {
+    uint32_t ms = ARG(0);
+    /* The frame loop computes its sleep through __ftol, so a bad x87 result
+     * turns "wait a few milliseconds" into a stall. Worth seeing. */
+    { static int shown; if (shown < 6) { shown++;
+        fprintf(stderr, "[time] Sleep(%u)\n", ms); } }
+    Sleep(ms);
+    STDRET(1);
+}
 
 void imp_QueryPerformanceCounter(void) {
     LARGE_INTEGER li; QueryPerformanceCounter(&li);
@@ -1046,13 +1054,40 @@ static uint32_t call_lifted(uint32_t va, int argc, const uint32_t* argv) {
         fprintf(stderr, "[shims] callback into unlifted VA 0x%08X\n", va);
         return 0;
     }
-    uint32_t saved = g_esp;
+    /*
+     * Save and restore the WHOLE register file, not just esp.
+     *
+     * On real hardware a window procedure or a timer callback arrives on its
+     * own thread with its own registers, and the interrupted code never
+     * notices. Here there is one global register file, so running a callback
+     * inline hands the interrupted function's eax/ecx/edx/ebx/esi/edi/ebp to
+     * whatever the callback does with them. aSystem::run keeps its loop state
+     * in esi and edi across the PeekMessage call; MouseTimer, fired from inside
+     * that shim, walked off with them and the frame loop never came back.
+     *
+     * The x87 stack goes too -- it is equally global, and a callback that does
+     * any float arithmetic would otherwise leave the interrupted code's
+     * operands rearranged underneath it.
+     */
+    uint32_t s_eax = g_eax, s_ecx = g_ecx, s_edx = g_edx, s_ebx = g_ebx;
+    uint32_t s_esp = g_esp, s_ebp = g_ebp, s_esi = g_esi, s_edi = g_edi;
+    int s_fp_top = g_fp_top;
+    uint16_t s_fpu_cw = g_fpu_cw;
+    double s_st[8];
+    memcpy(s_st, g_st, sizeof s_st);
+
     for (int i = argc - 1; i >= 0; i--)
         PUSH32(g_esp, argv[i]);
     PUSH32(g_esp, RECOMP_RETADDR);
     f();
-    g_esp = saved;
-    return g_eax;
+    uint32_t ret = g_eax;
+
+    g_eax = s_eax; g_ecx = s_ecx; g_edx = s_edx; g_ebx = s_ebx;
+    g_esp = s_esp; g_ebp = s_ebp; g_esi = s_esi; g_edi = s_edi;
+    g_fp_top = s_fp_top;
+    g_fpu_cw = s_fpu_cw;
+    memcpy(g_st, s_st, sizeof g_st);
+    return ret;
 }
 
 /* ============================================================
@@ -1100,10 +1135,26 @@ static LRESULT CALLBACK host_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
     uint32_t proc = class_proc((ATOM)GetClassLongPtrA(hwnd, GCW_ATOM));
     if (!proc) return DefWindowProcA(hwnd, msg, wp, lp);
     g_wndproc_depth++;
-    /* WM_ACTIVATEAPP decides whether the engine runs or parks in WaitMessage,
-     * so its wParam is worth calling out by name. */
-    if (msg == WM_ACTIVATEAPP)
-        fprintf(stderr, "[win] WM_ACTIVATEAPP active=%u\n", (unsigned)wp);
+    /*
+     * Keep the engine active.
+     *
+     * aSystem::run blocks in WaitMessage whenever the engine thinks it has lost
+     * the display -- correct for a 1999 fullscreen-exclusive title, which
+     * should yield the CPU when it is not on screen. Here it never gets the
+     * screen in the first place: the game runs in a window, and whatever
+     * launched it keeps the foreground, so the engine is told active=0 during
+     * startup and parks before drawing its first frame.
+     *
+     * So WM_ACTIVATEAPP is always delivered as activating. This is a windowed
+     * port's decision, the same one source ports make when they add a "run in
+     * background" option, not a workaround for a lifting bug -- the engine's
+     * own logic is working exactly as written.
+     */
+    if (msg == WM_ACTIVATEAPP) {
+        fprintf(stderr, "[win] WM_ACTIVATEAPP active=%u -> forced active\n",
+                (unsigned)wp);
+        wp = TRUE;
+    }
     { static int shown; if (shown < 12) { shown++;
         fprintf(stderr, "[win] wndproc msg=%04X (depth %d)\n", msg,
                 g_wndproc_depth); } }
@@ -1158,12 +1209,50 @@ void imp_CreateWindowExA(void) {
      * no host object behind it, and lpParam only reaches the game again inside
      * a CREATESTRUCT full of host pointers, which is worse than not offering
      * it. ponytail: marshal a CREATESTRUCT if one is ever actually read. */
-    HWND h = CreateWindowExA(ARG(0), (LPCSTR)simp(ARG(1)), (LPCSTR)simp(ARG(2)),
-                             ARG(3), (int)ARG(4), (int)ARG(5),
-                             (int)ARG(6), (int)ARG(7),
+    DWORD style = ARG(3), ex = ARG(0);
+    int x = (int)ARG(4), y = (int)ARG(5), w = (int)ARG(6), h2 = (int)ARG(7);
+
+    /*
+     * Give the game a real window.
+     *
+     * It asks for a borderless WS_POPUP at 0,0 the size of the display mode,
+     * which is exactly right for a fullscreen-exclusive title and exactly
+     * wrong here: it covers the desktop with something that cannot be moved,
+     * resized or closed. A framed window with the same CLIENT size is the same
+     * picture with a way out of it.
+     *
+     * If the requested size does not fit the work area the frame is shrunk to
+     * fit; present() already StretchBlts when the client and the surface
+     * differ, so the engine still renders at its own resolution.
+     */
+    if ((style & WS_POPUP) && !(style & WS_CHILD)) {
+        RECT wa = { 0, 0, 0, 0 };
+        SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
+        int maxw = (wa.right - wa.left) - 80, maxh = (wa.bottom - wa.top) - 120;
+        if (maxw > 0 && maxh > 0 && w > 0 && h2 > 0) {
+            double sc = 1.0;
+            if (w > maxw) sc = (double)maxw / w;
+            if (h2 * sc > maxh) sc = (double)maxh / h2;
+            w = (int)(w * sc);
+            h2 = (int)(h2 * sc);
+        }
+        style = (style & ~(DWORD)WS_POPUP) | WS_OVERLAPPEDWINDOW;
+        ex &= ~(DWORD)WS_EX_TOPMOST;
+        RECT r = { 0, 0, w, h2 };
+        AdjustWindowRect(&r, style, FALSE);
+        x = wa.left + 40;
+        y = wa.top + 40;
+        w = r.right - r.left;
+        h2 = r.bottom - r.top;
+        fprintf(stderr, "[win] popup -> framed window, client %dx%d\n",
+                (int)ARG(6), (int)ARG(7));
+    }
+
+    HWND h = CreateWindowExA(ex, (LPCSTR)simp(ARG(1)), (LPCSTR)simp(ARG(2)),
+                             style, x, y, w, h2,
                              HWND_OF(ARG(8)), NULL, GetModuleHandleA(NULL), NULL);
     fprintf(stderr, "[win] CreateWindowExA(\"%s\" style=%08X %dx%d) -> %p\n",
-            (const char*)simp(ARG(1)), ARG(3), (int)ARG(6), (int)ARG(7), (void*)h);
+            (const char*)simp(ARG(1)), style, w, h2, (void*)h);
     if (!h) {
         g_last_error = GetLastError();
         fprintf(stderr, "[win] CreateWindowExA failed (%u)\n", g_last_error);
