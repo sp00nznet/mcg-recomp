@@ -74,8 +74,9 @@ static uint32_t com_slot(recomp_func_t f) {
 
 typedef struct {
     uint32_t obj;          /* the simulated object */
-    uint32_t bits;         /* arena pixels, 8bpp */
+    uint32_t bits;         /* arena pixels, 8 or 16 bpp */
     uint32_t width, height, pitch;
+    uint32_t bpp;          /* the mode this surface was created under */
     uint32_t caps;
     int is_primary;
     int back;              /* index of the attached back buffer, -1 if none */
@@ -156,13 +157,29 @@ static void present(surface_t* s) {
     }
 
     const uint8_t* src = (const uint8_t*)ADDR(s->bits);
-    for (uint32_t y = 0; y < s->height; y++) {
-        const uint8_t* row = src + (size_t)y * s->pitch;
-        uint32_t* out = g_dib_px + (size_t)y * s->width;
-        for (uint32_t x = 0; x < s->width; x++) {
-            RGBQUAD c = g_pal[row[x]];
-            out[x] = ((uint32_t)c.rgbRed << 16) | ((uint32_t)c.rgbGreen << 8)
-                     | c.rgbBlue;
+    if (s->bpp == 16) {
+        /* 565 -> 888, replicating the high bits into the low ones so that a
+         * full-scale channel comes out full-scale rather than 248/252. */
+        for (uint32_t y = 0; y < s->height; y++) {
+            const uint16_t* row = (const uint16_t*)(src + (size_t)y * s->pitch);
+            uint32_t* out = g_dib_px + (size_t)y * s->width;
+            for (uint32_t x = 0; x < s->width; x++) {
+                uint32_t p = row[x];
+                uint32_t r = (p >> 11) & 0x1F, g = (p >> 5) & 0x3F, b = p & 0x1F;
+                out[x] = (((r << 3) | (r >> 2)) << 16)
+                       | (((g << 2) | (g >> 4)) << 8)
+                       |  ((b << 3) | (b >> 2));
+            }
+        }
+    } else {
+        for (uint32_t y = 0; y < s->height; y++) {
+            const uint8_t* row = src + (size_t)y * s->pitch;
+            uint32_t* out = g_dib_px + (size_t)y * s->width;
+            for (uint32_t x = 0; x < s->width; x++) {
+                RGBQUAD c = g_pal[row[x]];
+                out[x] = ((uint32_t)c.rgbRed << 16) | ((uint32_t)c.rgbGreen << 8)
+                         | c.rgbBlue;
+            }
         }
     }
 
@@ -372,7 +389,11 @@ static uint32_t make_surface(uint32_t w, uint32_t h, uint32_t caps) {
     memset(s, 0, sizeof *s);
     s->width = w;
     s->height = h;
-    s->pitch = (w + 3u) & ~3u;             /* DWORD-aligned rows, like the real one */
+    /* A surface is created in whatever mode is current. The logistics shell
+     * runs the whole game at 8bpp, but the mission's terrain renderer sets
+     * 16bpp -- so pitch is BYTES, not pixels, and doubles with it. */
+    s->bpp = g_mode_bpp == 16 ? 16 : 8;
+    s->pitch = (w * (s->bpp / 8) + 3u) & ~3u;   /* DWORD-aligned rows */
     s->bits = shims_alloc(s->pitch * h);
     s->caps = caps;
     s->back = -1;
@@ -410,7 +431,17 @@ static void fill_desc(surface_t* s, uint32_t d) {
     MEM32(d + SD_CAPS) = s->caps;
     MEM32(d + SD_PIXFMT + 0x00) = 32;          /* dwSize */
     MEM32(d + SD_PIXFMT + 0x04) = 0x20;        /* DDPF_RGB */
-    MEM32(d + SD_PIXFMT + 0x0C) = 8;           /* dwRGBBitCount */
+    MEM32(d + SD_PIXFMT + 0x0C) = s->bpp ? s->bpp : 8;   /* dwRGBBitCount */
+    if (s->bpp == 16) {
+        /* 565. The engine reads these masks rather than assuming a layout, so
+         * whatever is reported here is what it writes -- and present() below
+         * unpacks the same way. DDPF_RGB with no alpha, so the masks live at
+         * +0x10/+0x14/+0x18 and the alpha mask stays zero. */
+        MEM32(d + SD_PIXFMT + 0x10) = 0xF800u;      /* red   */
+        MEM32(d + SD_PIXFMT + 0x14) = 0x07E0u;      /* green */
+        MEM32(d + SD_PIXFMT + 0x18) = 0x001Fu;      /* blue  */
+        MEM32(d + SD_PIXFMT + 0x1C) = 0;            /* alpha */
+    }
 }
 
 static void sf_GetSurfaceDesc(void) {
@@ -642,7 +673,11 @@ static void dd2_SetDisplayMode(void) {
         SetActiveWindow(g_hwnd);
         SetFocus(g_hwnd);
     }
-    RET(g_mode_bpp == 8 ? DD_OK : DDERR_UNSUPPORTED);
+    /* 8bpp is the logistics shell; 16bpp is what the mission's terrain
+     * renderer asks for. Refusing 16 is what left the battlefield black:
+     * the engine reported "Unable to Set Display Mode" and never built a
+     * surface for it, while the 8-bit HUD kept drawing normally. */
+    RET((g_mode_bpp == 8 || g_mode_bpp == 16) ? DD_OK : DDERR_UNSUPPORTED);
     STDRET(6);
 }
 
@@ -732,7 +767,11 @@ static void dd_SetDisplayMode(void) {
         SetActiveWindow(g_hwnd);
         SetFocus(g_hwnd);
     }
-    RET(g_mode_bpp == 8 ? DD_OK : DDERR_UNSUPPORTED);
+    /* 8bpp is the logistics shell; 16bpp is what the mission's terrain
+     * renderer asks for. Refusing 16 is what left the battlefield black:
+     * the engine reported "Unable to Set Display Mode" and never built a
+     * surface for it, while the 8-bit HUD kept drawing normally. */
+    RET((g_mode_bpp == 8 || g_mode_bpp == 16) ? DD_OK : DDERR_UNSUPPORTED);
     STDRET(4);
 }
 
