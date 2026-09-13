@@ -249,24 +249,41 @@ run. Add a case whenever a primitive is suspected: it is cheap, and it converts
   run_pipeline.py is for.
 
 ### Current bring-up stop
-The campaign loads. Clicking **New Campaign** reaches **Briefing/Deployment**
-and it renders in full -- navigation column, three force groups, the tactical
-map with its numbered objectives, drop weight, and a 'Mech loadout with armour,
-internals and payload. `Mission::run`'s state machine (a jump table on
-`this->state` at `[0x8087A8]`) settles at state 3, the logistics shell. States
-10 and 8 are the intro-movie sequence; it completes in the first few seconds,
-and the repeated `SetDisplayMode2` calls are it restoring the display between
-movies, not a loop.
+**Deployment works.** The sequence that gets furthest:
 
-What stops a mission starting: **the Ready Area is empty**, so nothing can be
-deployed into a force group and the launch control beside the drop-weight bar
-stays disabled. A pilot and a 'Mech are clearly loaded -- the detail panel shows
-both -- but the roster list draws nothing and the pilot's RANK field renders as
-the filename of a portrait image, so a field in the pilot record is being read
-one slot out. Find that, and deployment should follow.
+    MCG_CLICK="477,165@24;477,165@34;477,165@44;37,376>248,84@56"
 
-Also open: the briefing screen's nav column (MAIN MENU / PURCHASING / 'MECH BAY)
-does not respond to scripted clicks, though the main menu's own items do.
+New Campaign (fired three times, because startup speed varies enough that one
+fixed offset lands on the main menu only about half the time), then a drag from
+the first Ready Area entry to Force Group 1. The result is CURRENT DROP WEIGHT
+25 TONS and FORCE GROUP 1 reading 28 -- a 'Mech really is assigned.
+
+That matters because it retires the theory this was stuck on for a long time:
+the Ready Area's thin rendering does NOT block deployment. The entries are live
+lObjects with working hit-testing whether or not they draw, so the drag lands
+on an invisible widget perfectly well. Do not go back to treating the drawing
+defect as the blocker.
+
+What is still missing is the launch control. Mission::run's state machine stays
+at 3 (the logistics shell) no matter what gets clicked. Ruled out by clicking
+them with `MCG_WATCH=*0x8087A8+0` armed, which reports every state change:
+the wide bar beside the drop-weight readout at UI (572,337) -- that one
+actually UNDEPLOYS the 'Mech -- the "MISSION" vertical tab at (208,263), and
+the bottom corners at (600,465) and (320,465). The state-3 branch of
+Mission::run contains no state write at all, so whatever starts a mission sets
+it from outside; `moveOnButtonHandleEvent` is bound to MissionResultsScreen,
+not the briefing, and StartMissionCallback is referenced only by
+SessionScreen::init, which is multiplayer. BriefingScreen::handleEvent touches
+the Mission object once and has not been read yet -- start there.
+
+Still open, but now known NOT to be in the way: each Ready Area cell draws only
+~160 of 2392 pixels (histogram: nine distinct palette indices, 2233 of them the
+wipe colour). The blit chain is intact and correctly aimed at every stage --
+aPort::copyTo is hooked and reports source size, destination rect, offset,
+transparency flag and whether any byte moved -- and half the 25x30 parts
+Logistics::drawMechBodyLoc composes leave the destination untouched, which for
+a transparent blit means an all-0xFF source. That may be the 'Mech's own armour
+data arriving empty rather than a drawing bug.
 
 ### Bring-up diagnostics available (trace builds)
 - `--selftest` -- lifted CRT string primitives, `FitIniFile::textToLong` (the

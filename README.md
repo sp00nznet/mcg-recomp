@@ -407,13 +407,22 @@ positive, zero and negative, plus the whole `seekPacket` tail end to end.
 
 Open, and honestly open rather than fixed:
 
-- **The Ready Area is empty**, so nothing can be deployed into a force group and
-  the launch control stays disabled. A pilot and a 'Mech are clearly loaded --
-  the detail panel shows both -- but the roster list draws nothing, and the
-  pilot's RANK field renders as the filename of a portrait image. Something in
-  the pilot record is being read one field out.
-  That is the next thread, and it is what stands between the briefing screen and
-  a mission.
+- **The launch control has not been found.** Deploying works: three New
+  Campaign clicks and a drag from the first Ready Area entry into Force Group 1
+  gives CURRENT DROP WEIGHT 25 TONS and FORCE GROUP 1 reading 28, so a 'Mech
+  really is assigned. But `Mission::run`'s state machine stays at 3, the
+  logistics shell, whatever is clicked next. The state-3 branch writes no state
+  at all, so a mission is started from outside `Mission::run`;
+  `BriefingScreen::handleEvent` touches the Mission object once and is the next
+  thing to read.
+- **Each Ready Area entry draws only ~160 of its 2392 pixels** -- nine distinct
+  palette indices, 2233 of them the wipe colour. This is NOT what blocks
+  deployment: the entries are live objects with working hit-testing whether or
+  not they draw, and the drag lands on them regardless. The blit chain is
+  intact and correctly aimed at every stage; half the 25x30 parts
+  `Logistics::drawMechBodyLoc` composes leave the destination untouched, which
+  for a transparent blit means an all-`0xFF` source -- possibly the 'Mech's own
+  armour data arriving empty rather than a drawing fault.
 - **The nav column does not respond** to scripted clicks on the briefing screen
   (MAIN MENU / PURCHASING / 'MECH BAY), though the main menu's own items do.
 - **The shell renders 640x480 into a 1280x1024 mode**, which the window then
