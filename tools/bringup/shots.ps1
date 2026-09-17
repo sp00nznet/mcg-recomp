@@ -6,7 +6,7 @@
 # MCG_CLICK uses, so the two line up:
 #
 #   $env:MCG_CLICK = '477,165@8;477,165@18'
-#   .	oolsringup\shots.ps1 -At 12,30 -Seconds 60
+#   ./tools/bringup/shots.ps1 -At 12,30 -Seconds 60
 #
 # ponytail: PrintWindow, not a D3D capture. The window IS the output here.
 param([string]$At = "60,120", [int]$Seconds = 180, [string]$Prefix = "t")
