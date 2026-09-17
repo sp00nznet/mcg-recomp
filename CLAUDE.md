@@ -103,9 +103,9 @@ investigation that did not land) and ABL.
   `build-trace/` with `-DCMAKE_C_FLAGS=-DRECOMP_TRACE` for that plus a 1024-deep
   function-entry backtrace. It found both faults above in one run each.
 
-### Function discovery: four sources, and why each exists
+### Function discovery: five sources, and why each exists
 `config/functions.json` holds only the CodeView publics. run_pipeline.py adds
-three more sources at lift time, and all three were forced by a real bug:
+four more sources at lift time, and every one was forced by a real bug:
 1. **FPO records** (+94) -- describe a frame regardless of linkage.
 2. **Data pointer tables** (+63) -- runs of aligned dwords that are each null or
    a .text address (constructor tables, vtables, callback tables). A static
@@ -120,6 +120,18 @@ three more sources at lift time, and all three were forced by a real bug:
    the stack: **exactly 8 bytes leaked per strcpy call**, which shifted every
    later stack local and is why `systemInit` read an uninitialised vtable
    pointer out of a stack object.
+4. **Code addresses loaded as IMMEDIATES** (+102). A function whose address is
+   only ever taken -- `mov esi, 0x00721C10`, then called through the register --
+   is invisible to all four sources above: it is in no table, nothing branches
+   to it, and a RelNoDbg build gave it no public symbol. `AG_ellipse_fill` came
+   in this way, and without it the mission drew no terrain at all.
+
+   Scan only NON-branch instructions. A call or jump immediate IS the branch
+   target and source 3 already has it; worse, scanning them splits a function at
+   every jcc target. Both candidates still go through `is_boundary()`.
+   **The function total is the tell: a discovery change must make it go UP.**
+   An early version of this that skipped branch instructions with `continue`
+   swallowed source 3 entirely and the count fell 5,981 -> 5,964.
 
 Splitting a function to create such an entry is SAFE in this model: the part
 before falls through to it, and registers (ebp included) are deliberately global
@@ -289,12 +301,20 @@ it zoomed the battlefield 2x. `MCG_NOSCALE=1` shows the raw mode.
 `MCG_CLICK` times run from Mission::run reaching state 3, not from process
 start, because the intro movies make startup vary by tens of seconds.
 
+**Next frontier: no move order has been accepted yet.** Input reaches the
+simulation -- selecting a 'Mech registers, and an invalid order is REFUSED with
+the red-X cursor, which is the engine's own answer and not a dead click. What is
+missing is a valid destination. Guessing at screen pixels is the wrong way in:
+ask the engine which terrain it considers passable and aim there, rather than
+inferring it from what the battlefield looks like.
+
 ### Bring-up diagnostics available (trace builds)
 - `--selftest` -- lifted CRT string primitives, `FitIniFile::textToLong` (the
   engine's own number parser, hex and decimal), the printf float path
   (`sprintf` end to end, which needs `_cfltcvt_init` called first or it exits
   with R6002), and the three VFX blitters: `VFX_pane_wipe`, `VFX_pane_copy`,
-  `DrawTransparent`. 22 cases, all passing.
+  `DrawTransparent`, and `AG_ellipse_fill` (guard bytes, colour and a
+  plausible filled area). 27 cases, all passing.
 - `MCG_WATCHDOG=1` -- a thread that prints, every 3s, the running lifted
   function, the instruction, the shadow call depth and the peek/dispatch/wndproc
   counters. "PC unchanged" plus a flat peek count is a hang; "PC unchanged" with
@@ -365,9 +385,9 @@ real one is passed through now; (2) `GetTimeZoneInformation` leaving its struct
 stale — implemented now. Neither was the cause of anything.
 
 ## Phase 1/2 (done)
-- `run_pipeline.py` drives the shared lifter: **5,760/5,760 functions, 0 lift
-  errors**, 829,128 lines across 12 files. Compiles to **13 objects, 0 errors,
-  0 warnings** (`cl /nologo /c /W1 /MP`).
+- `run_pipeline.py` drives the shared lifter: **6,066/6,066 functions, 0 lift
+  errors**, 1.49M lines across 13 files, in about 12 seconds. Compiles to
+  **0 errors, 0 warnings** (`cl /nologo /c /W1 /MP`).
 - **Emit `lift32.FUNCTION_LOCALS` as the per-function preamble, never a
   hand-written list.** `ebp` and the x87 stack (`_st`/`_fp_top`/`_fpu_cw`) are
   deliberately GLOBAL in `recomp_types.h`, because an optimising compiler splits
