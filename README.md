@@ -52,11 +52,11 @@ discovery heuristic in this repo because none is needed.
 | Phase | Status | Description |
 |-------|--------|-------------|
 | **Phase 0** | **Complete** | Binary triage, CodeView symbol recovery — **5,760 named functions, 98.7% of `.text`** |
-| **Phase 1** | **Complete** | x86 → C code generation — **5,981 functions, 0 lift errors**, 1.49M lines |
+| **Phase 1** | **Complete** | x86 → C code generation — **6,066 functions, 0 lift errors**, 1.49M lines |
 | **Phase 2** | **Complete** | Compilation — **13 objects, 0 errors, 0 warnings** (MSVC, `/W1`) |
 | **Phase 3** | **Complete** | Links and runs — **CRT startup completes, game code executes**, 204 import bridges |
 | **Phase 4** | **In progress** | Win32 + DirectX 6 HAL — **renders and navigates: title, menus, campaign loads** |
-| **Phase 5** | **In progress** | Engine abstraction — **the battlefield renders: terrain, units, HUD** |
+| **Phase 5** | **In progress** | Engine abstraction — **missions play: terrain, units, HUD, working input** |
 | Phase 6 | Pending | Asset loading (FST / PAK / SHP / FIT) |
 | Phase 7+ | Pending | ABL script VM, logistics, mission layer, modern backend |
 
@@ -142,10 +142,10 @@ every entry lifts:
 
 | Result | Value |
 |--------|-------|
-| Functions lifted | **5,760 / 5,760** |
+| Functions lifted | **6,066** (5,760 from CodeView + 306 discovered) |
 | Lift errors | **0** |
-| Output | 829,128 lines of C, 41.1 MB, 12 files |
-| Time | ~9 s |
+| Output | 1.49M lines of C, 65.7 MB, 13 files |
+| Time | ~12 s |
 
 ```
 py -3.11 run_pipeline.py            # -> src/recomp/gen/
@@ -426,22 +426,21 @@ positive, zero and negative, plus the whole `seekPacket` tail end to end.
 
 Open, and honestly open rather than fixed:
 
-- **Menu buttons still render as thin bars.** Cosmetic, and known not to block
-  anything — the widgets are live objects with working hit-testing whether or
-  not they draw.
-- **Each Ready Area entry draws only ~160 of its 2392 pixels** -- nine distinct
-  palette indices, 2233 of them the wipe colour. This is NOT what blocks
-  deployment: the entries are live objects with working hit-testing whether or
-  not they draw, and the drag lands on them regardless. The blit chain is
-  intact and correctly aimed at every stage; half the 25x30 parts
-  `Logistics::drawMechBodyLoc` composes leave the destination untouched, which
-  for a transparent blit means an all-`0xFF` source -- possibly the 'Mech's own
-  armour data arriving empty rather than a drawing fault.
-- **The nav column does not respond** to scripted clicks on the briefing screen
-  (MAIN MENU / PURCHASING / 'MECH BAY), though the main menu's own items do.
-- **The shell renders 640x480 into a 1280x1024 mode**, which the window then
-  stretches. Present #8700 reads exactly 307,200 source bytes, so this is the
-  engine's own choice rather than a presentation bug.
+- **No move order has been accepted yet.** Selection works — clicking a 'Mech
+  on the mech bar runs `mechIconHandleEvent`, the selection registers, and the
+  engine refuses an order onto impassable ground with its own red-X cursor, so
+  input reaches the simulation. What is missing is a *valid* destination:
+  picking one from terrain the engine already considers passable, rather than
+  guessing at pixels.
+- **Menu buttons render as thin bars**, and each Ready Area entry paints only
+  ~160 of its 2392 pixels. Cosmetic, and known not to block anything — the
+  widgets are live objects with working hit-testing whether or not they draw,
+  which is exactly why the deployment drags land on them. The blit chain is
+  intact and correctly aimed at every stage; the three VFX primitives and
+  `AG_ellipse_fill` are all covered by self-tests and all pass.
+- **The intro Smacker movies are not decoded.** `SmackOpen` hands back a
+  one-frame movie that has already finished, so the sequence completes
+  instantly instead of playing.
 - **Lifted `__sbh_alloc_block`** faults building a block footer from a local
   that holds a pointer where a size belongs. The runtime sets `___sbh_threshold`
   to 0 -- the CRT's own switch, what `_set_sbh_threshold()` writes -- so
