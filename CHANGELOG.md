@@ -6,8 +6,14 @@ versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Combat works**: in the first campaign mission a 'Mech sent down to the
+  road meets an armored car, fires, and destroys it, entirely in the engine's
+  own code; nothing needed fixing. The conformance run now does exactly that
+  (15/15): new milestones for a 'Mech firing and an enemy vehicle destroyed.
+- `LOG_CALLS` covers weapon fire, weapon hits, unit destruction, attack
+  orders and `Mission::EndScenario`.
 - **Move orders work**: select a 'Mech, click open ground, and it walks there.
-  The conformance run now does exactly that (13/13).
+  The conformance run does that too.
 - `LOG_CALLS` in `run_pipeline.py`: a lifted function can print a line on
   each of its first 20 calls (`Parser::SendTacOrder` does), which is how the
   harness sees a player order happen. Direct calls never reach

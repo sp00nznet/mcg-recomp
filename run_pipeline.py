@@ -98,6 +98,17 @@ OVERRIDES = {
 # generated body itself. Costs one static test per call.
 LOG_CALLS = {
     0x006D3B90: 'Parser::SendTacOrder: the player gave an order',
+    0x006A9A10: 'MechWarrior::orderAttackObject',
+    0x0067FF00: 'BattleMech::fireWeapon',
+    0x006703A0: 'GroundVehicle::fireWeapon',
+    0x0069EE80: 'Turret::fireWeapon',
+    0x0067F940: 'BattleMech::handleWeaponHit',
+    0x006700D0: 'GroundVehicle::handleWeaponHit',
+    0x006A15C0: 'Turret::handleWeaponHit',
+    0x006535B0: 'Building::handleWeaponHit',
+    0x00675F80: 'BattleMechType::handleDestruction',
+    0x0066A120: 'GroundVehicleType::handleDestruction',
+    0x0072BC20: 'Mission::EndScenario',
 }
 
 

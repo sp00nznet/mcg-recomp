@@ -34,13 +34,14 @@ BASELINE = os.path.join(ROOT, 'conformance.json')
 
 # New Campaign (three clicks: the menu, then two confirmations), three drags
 # from the Ready Area into the force groups, then launch. Then, in the mission
-# (1280x1024), select the first 'Mech on the mech bar and click open ground up
-# and to the right of the lance. Seconds from the logistics shell coming up,
+# (1280x1024), select the first 'Mech on the mech bar and send it down to the
+# road south-east of the drop zone, where an armored car is waiting; the 'Mech
+# engages it on its own. Seconds from the logistics shell coming up,
 # which is when the host starts the script.
 CLICKS = ('477,165@8;477,165@18;477,165@28;37,376>248,61@45;'
           '37,376>304,61@55;37,376>246,172@65;570,339@78;570,339@90;'
-          '15,1005@115;820,430@122')
-SECONDS = 170
+          '15,1005@115;764,891@120')
+SECONDS = 230
 
 # (name, what the host prints when it is reached). Order is boot order.
 MILESTONES = [
@@ -55,6 +56,8 @@ MILESTONES = [
     ('scripted clicks all delivered', r'\[input\] firing 9 '),
     ('a click on open ground is a player order',
      r'(?s)\[input\] firing 9 .*\[engine\] Parser::SendTacOrder'),
+    ("a 'Mech fires", r'\[engine\] BattleMech::fireWeapon'),
+    ('an enemy vehicle is destroyed', r'\[engine\] GroundVehicleType::handleDestruction'),
     ('1000 frames', r'\[capture\] frame 1000 presented'),
     ('still in the mission at the time limit',
      r'(?s)\[mission\] state 3 -> 7(?:(?!\[mission\] state 7 -> ).)*\[watchdog\] \d+ s: stopping'),

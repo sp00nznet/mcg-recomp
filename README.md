@@ -1,6 +1,6 @@
 # MechCommander Gold — Static Recompilation
 
-![The first move order: a 'Mech selected on the mech bar walks to a point clicked on open ground](docs/images/first-move.gif)
+![The first kill: a 'Mech sent down to the road meets an armored car, opens fire, and leaves it a smoking wreck](docs/images/first-kill.gif)
 
 Static recompilation of **MechCommander Gold** / *Desperate Measures*
 (1998–99, FASA Interactive / MicroProse), from its shipping `MCX.EXE` to C
@@ -10,7 +10,7 @@ Built on the [pcrecomp](https://github.com/sp00nznet/pcrecomp) toolchain and
 following its shared house style (layout, CLI, conformance harness, headless
 mode).
 
-## Status: **v0.1.0-dev, alpha. Boots, plays the menus, and plays the first campaign mission far enough to give orders: a 'Mech selected and sent across the map walks there. Recompiled throughout.**
+## Status: **v0.1.0-dev, alpha. Boots, plays the menus, and plays the first campaign mission through its first fight: a 'Mech sent across the map walks there, meets an armored car, and destroys it. Recompiled throughout.**
 
 | Stage | State |
 |---|---|
@@ -21,11 +21,11 @@ mode).
 | Host (`build/mcg_recomp.exe`, x64) | maps the image at its own addresses; Win32 forwarded to the host, DirectDraw/DirectSound/DirectPlay mocked as COM objects in simulated memory |
 | Graphics | the engine's own software renderer, 8bpp shell and 16bpp mission, presented into a framed window |
 | Intro, main menu, campaign shell | **run**: New Campaign, briefing, deployment (drag 'Mechs into force groups), launch |
-| Mission | **runs**: terrain, water, forest, units, HUD, radar. **Selection and move orders work**; combat and mission end not yet tried |
+| Mission | **runs**: terrain, water, forest, units, HUD, radar. **Selection, move orders and combat work**: units fire, take hits and are destroyed. Mission end not yet reached |
 | Sound | silent: DirectSound buffers are filled by the engine but not played |
 | Movies | not decoded: each Smacker movie ends immediately |
 | Headless mode | `--headless --record out.mp4`, with `--click` for scripted input. Never shows or activates a window |
-| Conformance harness | **13/13** milestones (boot to a mission and a move order, headless), **31/31** self-tests, 0 lift errors ([tools/conformance.py](tools/conformance.py)) |
+| Conformance harness | **15/15** milestones (boot to a mission, a move order and a kill, headless), **31/31** self-tests, 0 lift errors ([tools/conformance.py](tools/conformance.py)) |
 
 ## Screenshots
 
@@ -34,7 +34,7 @@ Real output of `build\mcg_recomp.exe`, recompiled code throughout:
 | | |
 |---|---|
 | ![the main menu](docs/images/main-menu.png) | ![briefing and deployment: a 'Mech in Force Group 1, the tactical map](docs/images/deployment.png) |
-| ![in mission: terrain, water, forest, the HUD and the deployed lance](docs/images/mission.png) | |
+| ![in mission: terrain, water, forest, the HUD and the deployed lance](docs/images/mission.png) | ![the first move order: a 'Mech walks to a clicked point](docs/images/first-move.gif) |
 
 ## What is not in this repo
 

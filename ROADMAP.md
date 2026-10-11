@@ -8,7 +8,8 @@ Each milestone lands with a conformance milestone and a note in `docs/`.
 
 - ~~A move order the engine accepts~~: done. Next, check it in the harness by
   position, not only by `Parser::SendTacOrder` being called.
-- **Combat**: attack an enemy, take damage, a unit destroyed.
+- ~~Combat~~: done. A 'Mech engages an armored car on its own and destroys it.
+  Next: an explicit attack order (click an enemy), and a 'Mech lost.
 - **Mission end**: objectives complete, the debriefing and salvage screens.
 - **The third drag**: the scripted deployment lands two 'Mechs of three.
 

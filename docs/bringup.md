@@ -237,6 +237,26 @@ the run):
   start, so it is no signal that the *player's* order arrived;
   `Parser::SendTacOrder` is.
 
+## Combat: worked first time
+
+Nothing needed fixing; the work was finding an enemy. The campaign's first
+mission is `mis0101` ("In The Beginning"), not `MCX0101` (that is the
+Desperate Measures campaign); `data\missions\mechcmdr1.fit` lists the order.
+Its `[DropZone0]` is world (-1900,1410), and the nearest Clan units are
+armored cars around (-865,744) on the road south-east of it.
+
+Screen to world, measured from the coordinates in three `SendTacOrder` calls
+with the camera where the mission leaves it (screen centre 640,512 is about
+world -1876,1388):
+
+    wx ~ -1876 + 1.24*(sx-640) + 1.64*(sy-512)
+    wy ~  1388 + 1.08*(sx-640) - 1.64*(sy-512)
+
+So (764,891) sends the 'Mech to the road. An armored car arrives, both open
+fire, and the car is destroyed (`GroundVehicleType::handleDestruction`) about
+a minute later. Whether the car scores a hit varies between runs, so the
+harness checks only the 'Mech firing and the kill.
+
 ## Ruled out, do not retry
 
 1. `FitIniFile::textToLong` returning bad counts: all self-test cases pass.
