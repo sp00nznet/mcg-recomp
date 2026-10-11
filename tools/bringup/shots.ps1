@@ -30,7 +30,7 @@ if (-not ('Shots' -as [type])) { Add-Type -TypeDefinition $src -ReferencedAssemb
 Get-Process mcg_recomp -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 300
 $env:MCG_WATCHDOG = '1'
-$p = Start-Process '.\build-trace\mcg_recomp.exe' -ArgumentList 'MCX.EXE' `
+$p = Start-Process '.\build-trace\mcg_recomp.exe' -ArgumentList '--run' `
      -RedirectStandardError 'run.log' -RedirectStandardOutput 'run.out' -PassThru -NoNewWindow
 $t0 = Get-Date
 $marks = $At.Split(',') | ForEach-Object { [double]$_ }

@@ -75,4 +75,4 @@ if(MSVC)
   target_compile_options(mcg_recomp PRIVATE /bigobj)
 endif()
 
-target_link_libraries(mcg_recomp PRIVATE kernel32 user32 gdi32 winmm advapi32)
+target_link_libraries(mcg_recomp PRIVATE kernel32 user32 gdi32 winmm advapi32 dwmapi)

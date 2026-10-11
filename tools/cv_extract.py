@@ -10,12 +10,15 @@ table. That is the whole function table -- there is no discovery heuristic here
 and none is needed.
 
 Outputs (paths relative to the repo root):
-    config/functions.json     lifter-compatible entry list  (committed)
-    analysis/cv_symbols.json  every public symbol, all segments
-    analysis/cv_modules.json  the 612 object modules + source paths
-    analysis/fpo.json         frame/prologue records, used to tighten bounds
+    work/functions.json       lifter-compatible entry list
+    work/cv_symbols.json      every public symbol, all segments
+    work/cv_modules.json      the 612 object modules + source paths
+    work/fpo.json             frame/prologue records, used to tighten bounds
 
-Usage:  py -3.11 tools/cv_extract.py [MCX.EXE] [repo_root]
+All four are derived from the binary, so they live in gitignored work/ and are
+rebuilt from your own copy -- never committed (REPO_RULES section 3).
+
+Usage:  py -3 tools/cv_extract.py [game/MCX.EXE] [repo_root]   -> work/
         py -3.11 tools/cv_extract.py --selftest
 """
 import bisect
@@ -325,8 +328,8 @@ def build(exe_path, root):
             'source': src,
         })
 
-    os.makedirs(os.path.join(root, 'config'), exist_ok=True)
-    os.makedirs(os.path.join(root, 'analysis'), exist_ok=True)
+    # Derived from the binary, so never committed: work/ is gitignored.
+    os.makedirs(os.path.join(root, 'work'), exist_ok=True)
 
     def dump(rel, obj):
         path = os.path.join(root, rel)
@@ -340,10 +343,10 @@ def build(exe_path, root):
           f'entry 0x{pe.image_base + pe.entry_rva:08X}')
     print(f'  CodeView NB11 at file offset 0x{cv.base:X}, '
           f'{len(cv.entries)} subsections')
-    dump('config/functions.json', functions)
-    dump('analysis/cv_symbols.json', syms)
-    dump('analysis/cv_modules.json', modules)
-    dump('analysis/fpo.json', fpo)
+    dump('work/functions.json', functions)
+    dump('work/cv_symbols.json', syms)
+    dump('work/cv_modules.json', modules)
+    dump('work/fpo.json', fpo)
 
     named = sum(1 for f in functions if f['demangled'])
     covered = sum(f['size'] for f in functions)
@@ -358,7 +361,7 @@ def selftest():
     """The invariants that matter: bounds never overlap, every entry lands in
     .text, and the PE entry point is one of the functions we found."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    exe = os.path.join(root, 'MCX.EXE')
+    exe = os.path.join(root, 'game', 'MCX.EXE')
     with open(exe, 'rb') as fh:
         pe = PE(fh.read())
     funcs, _syms, mods = build(exe, root)
@@ -391,5 +394,5 @@ if __name__ == '__main__':
         selftest()
     else:
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        exe = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, 'MCX.EXE')
+        exe = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, 'game', 'MCX.EXE')
         build(exe, sys.argv[2] if len(sys.argv) > 2 else here)

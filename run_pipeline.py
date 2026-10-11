@@ -11,7 +11,7 @@ the usual project driver, both because this target shipped its symbols:
   * generated functions keep the original names, so the output is greppable —
     `Mech__handleCollision_00641A30` rather than `sub_00641A30`.
 
-Usage: py -3.11 run_pipeline.py [MCX.EXE] [out_dir] [functions_per_file]
+Usage: py -3 run_pipeline.py [game/MCX.EXE] [out_dir] [functions_per_file]
 """
 import json
 import os
@@ -21,7 +21,8 @@ import time
 import struct
 
 _here = os.path.dirname(os.path.abspath(__file__))
-_pc = os.path.join('G:', os.sep, 'recomp', 'pc', 'tools', 'tools')
+# The pcrecomp checkout: $PCRECOMP, else a sibling folder called tools.
+_pc = os.path.join(os.environ.get('PCRECOMP') or os.path.join(_here, '..', 'tools'), 'tools')
 sys.path.insert(0, os.path.join(_pc, 'pe'))
 sys.path.insert(0, os.path.join(_pc, 'lift'))
 
@@ -364,7 +365,7 @@ def write_chunk(out, idx, chunk):
 
 # --------------------------------------------------------------------------
 def main():
-    exe = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_here, 'MCX.EXE')
+    exe = sys.argv[1] if len(sys.argv) > 1 else os.path.join(_here, 'game', 'MCX.EXE')
     out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(_here, 'src', 'recomp', 'gen')
     split = int(sys.argv[3]) if len(sys.argv) > 3 else 500
     os.makedirs(out, exist_ok=True)
@@ -388,9 +389,9 @@ def main():
                         text.raw_offset + min(text.virtual_size, text.raw_size)]
     cs, ce = info.code_start, info.code_end
 
-    with open(os.path.join(_here, 'config', 'functions.json'), encoding='utf-8') as fh:
+    with open(os.path.join(_here, 'work', 'functions.json'), encoding='utf-8') as fh:
         table = json.load(fh)
-    with open(os.path.join(_here, 'analysis', 'fpo.json'), encoding='utf-8') as fh:
+    with open(os.path.join(_here, 'work', 'fpo.json'), encoding='utf-8') as fh:
         fpo = json.load(fh)
 
     # Start from the CodeView publics, then add what a public symbol table
@@ -669,7 +670,7 @@ def main():
             with open(fp, encoding='utf-8', errors='replace') as fh:
                 total_lines += sum(1 for _ in fh)
 
-    with open(os.path.join(_here, 'analysis', 'phase1_codegen.json'), 'w',
+    with open(os.path.join(_here, 'work', 'phase1_codegen.json'), 'w',
               encoding='utf-8') as f:
         json.dump({'functions': len(all_entries), 'errors': errors,
                    'files': idx, 'lines': total_lines, 'bytes': total_bytes,

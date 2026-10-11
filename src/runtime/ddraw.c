@@ -32,7 +32,6 @@
 #define DD_OK                 0x00000000u
 #define DDERR_UNSUPPORTED     0x80004001u
 #define DDERR_INVALIDPARAMS   0x80070057u
-#define E_NOINTERFACE         0x80004002u
 
 /* ---- synthetic COM method addresses -------------------------------------
  * Above the runtime-export range (0x11000000) and far above every simulated
@@ -138,6 +137,90 @@ static surface_t* current_backbuffer(void) {
         if (g_surf[i].is_primary)
             return g_surf[i].back >= 0 ? &g_surf[g_surf[i].back] : &g_surf[i];
     return NULL;
+}
+
+/*
+ * --record: the presented picture, piped to ffmpeg as raw BGRA.
+ *
+ * It records the frame buffer, not the window, so it works the same headless
+ * (a cloaked window has nothing on screen to capture) and over RDP. The shown
+ * region changes size between the 640x480 shell and the full-mode mission, so
+ * every frame is stretched to one fixed 1280x1024 picture: ffmpeg's rawvideo
+ * input cannot change size mid-stream.
+ *
+ * Paced by the wall clock at 30 fps: each present writes the frame as many
+ * times as the clock says are due, so the video plays at real speed however
+ * fast or slow the engine presents. ponytail: frames are duplicated, not
+ * blended; good enough to show what happened.
+ */
+#define REC_W 1280
+#define REC_H 1024
+#define REC_FPS 30
+static FILE* g_rec;
+static HDC g_rec_dc;
+static HBITMAP g_rec_bmp;
+static void* g_rec_px;
+static DWORD g_rec_t0;
+static uint64_t g_rec_written;
+static unsigned g_presents;
+
+static void record_close(void) {
+    if (g_rec) {
+        _pclose(g_rec);
+        g_rec = NULL;
+        fprintf(stderr, "[capture] %s: %llu frames written\n", g_record_path,
+                (unsigned long long)g_rec_written);
+    }
+}
+
+static void record_frame(uint32_t sw, uint32_t sh) {
+    g_presents++;
+    if (g_presents == 1 || g_presents % 100 == 0)
+        fprintf(stderr, "[capture] frame %u presented\n", g_presents);
+    if (g_record_path && !g_rec && !g_rec_written) {
+        char cmd[MAX_PATH + 200];
+        snprintf(cmd, sizeof cmd, "ffmpeg -loglevel error -y -f rawvideo "
+                 "-pix_fmt bgra -s %dx%d -r %d -i - -pix_fmt yuv420p \"%s\"",
+                 REC_W, REC_H, REC_FPS, g_record_path);
+        g_rec = _popen(cmd, "wb");
+        BITMAPINFO bi;
+        memset(&bi, 0, sizeof bi);
+        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+        bi.bmiHeader.biWidth = REC_W;
+        bi.bmiHeader.biHeight = -REC_H;              /* top-down, as ffmpeg reads */
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        g_rec_dc = CreateCompatibleDC(NULL);
+        g_rec_bmp = CreateDIBSection(g_rec_dc, &bi, DIB_RGB_COLORS, &g_rec_px, NULL, 0);
+        SelectObject(g_rec_dc, g_rec_bmp);
+        SetStretchBltMode(g_rec_dc, HALFTONE);
+        g_rec_t0 = GetTickCount();
+        if (!g_rec || !g_rec_px) {
+            fprintf(stderr, "[capture] cannot record: is ffmpeg on PATH?\n");
+            g_record_path = NULL;
+        } else {
+            fprintf(stderr, "[capture] recording to %s\n", g_record_path);
+        }
+    }
+    if (g_rec) {
+        HGDIOBJ old = SelectObject(g_memdc, g_dib);
+        StretchBlt(g_rec_dc, 0, 0, REC_W, REC_H, g_memdc, 0, 0, (int)sw, (int)sh, SRCCOPY);
+        SelectObject(g_memdc, old);
+        GdiFlush();
+        uint64_t due = (uint64_t)(GetTickCount() - g_rec_t0) * REC_FPS / 1000 + 1;
+        for (; g_rec_written < due; g_rec_written++)
+            fwrite(g_rec_px, 4, (size_t)REC_W * REC_H, g_rec);
+    }
+    if (g_max_frames && g_presents >= (unsigned)g_max_frames) {
+        fprintf(stderr, "[capture] %u frames: stopping\n", g_presents);
+        mcg_quit(0);
+    }
+}
+
+void mcg_quit(int code) {
+    record_close();
+    fflush(NULL);
+    ExitProcess((UINT)code);
 }
 
 static void present(surface_t* s) {
@@ -388,6 +471,8 @@ static void present(surface_t* s) {
     }
     g_shown_w = sw;
     g_shown_h = sh;
+
+    record_frame(sw, sh);
 
     HDC wdc = GetDC(g_hwnd);
     HGDIOBJ old = SelectObject(g_memdc, g_dib);

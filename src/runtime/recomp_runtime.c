@@ -46,17 +46,19 @@ ptrdiff_t g_mem_base = 0;      /* 1:1 mapping -- see the note above */
 
 uint32_t g_cur_func = 0;
 uint32_t g_icall_trace[ICALL_TRACE_SIZE] = {0};
+uint32_t g_icall_from[ICALL_TRACE_SIZE] = {0};   /* who made each indirect call */
 uint32_t g_icall_trace_idx = 0;
 uint32_t g_icall_count = 0;
 
 #ifdef RECOMP_TRACE
 uint32_t g_enter_trace[RECOMP_ENTER_SIZE] = {0};
 uint32_t g_enter_idx = 0;
+#endif
 /* VA of the instruction currently executing. The generated code assigns this
  * before every instruction under RECOMP_TRACE, which turns "it faulted
- * somewhere in this 777-byte function" into an exact address. */
+ * somewhere in this 777-byte function" into an exact address. Without it the
+ * watchdog reads 0 here. */
 uint32_t g_cur_pc = 0;
-#endif
 
 /*
  * Call-site stack balance check (trace builds only).
@@ -319,12 +321,23 @@ static void dump_around(const char* what, uint32_t va) {
  * file and stack are global and a second thread inside them would corrupt the
  * first.
  */
+static long g_watchdog_secs;   /* --watchdog S: stop after S seconds */
+
 static DWORD WINAPI watchdog(LPVOID unused) {
     (void)unused;
     uint32_t last_pc = 0;
     int same = 0;
+    DWORD t0 = GetTickCount();
     for (;;) {
         Sleep(3000);
+        /* ponytail: quits from this thread, so a frame being written to the
+         * recording at that instant is cut short. Harmless at the end of a
+         * capture; route it through the main thread if it ever matters. */
+        if (g_watchdog_secs && GetTickCount() - t0 >= (DWORD)g_watchdog_secs * 1000) {
+            fprintf(stderr, "[watchdog] %ld s: stopping\n", g_watchdog_secs);
+            dump_callstack();
+            mcg_quit(0);
+        }
         uint32_t pc = g_cur_pc;
         same = (pc == last_pc) ? same + 1 : 0;
         last_pc = pc;
@@ -461,7 +474,7 @@ static DWORD WINAPI watchdog(LPVOID unused) {
 }
 
 static void start_watchdog(void) {
-    if (getenv("MCG_WATCHDOG"))
+    if (getenv("MCG_WATCHDOG") || g_watchdog_secs)
         CreateThread(NULL, 0, watchdog, NULL, 0, NULL);
 }
 
@@ -1415,8 +1428,51 @@ static int crt_selftest(void) {
     return g_st_fail ? 1 : 0;
 }
 
+int g_headless;
+const char* g_record_path;
+long g_max_frames;
+
+static const char USAGE[] =
+    "usage: mcg_recomp [--run] [--game DIR] [--headless] [--record out.mp4]\n"
+    "                  [--frames N] [--watchdog S] [--click SPEC] [--selftest]\n"
+    "  --run            enter the game (without it: map, bind and stop)\n"
+    "  --game DIR       the game folder, holding MCX.EXE (default: game)\n"
+    "  --headless       a cloaked window that never reaches a screen or takes\n"
+    "                   focus; only scripted input counts\n"
+    "  --record F       pipe the presented frames to ffmpeg (30 fps, wall clock)\n"
+    "  --frames N       exit after N presented frames\n"
+    "  --watchdog S     report where the engine is every 3 s; stop after S s\n"
+    "  --click SPEC     scripted mouse, as MCG_CLICK: \"x,y@t;x,y>x2,y2@t\"\n"
+    "  --selftest       check the lifted CRT and blitters against the host\n";
+
 int main(int argc, char** argv) {
-    const char* image = (argc > 1) ? argv[1] : "MCX.EXE";
+    const char* game = "game";
+    int run = 0, selftest = 0;
+    for (int i = 1; i < argc; i++) {
+        const char* a = argv[i];
+        const char* v = i + 1 < argc ? argv[i + 1] : NULL;
+        if (!strcmp(a, "--run")) run = 1;
+        else if (!strcmp(a, "--selftest")) selftest = 1;
+        else if (!strcmp(a, "--headless")) g_headless = 1;
+        else if (!strcmp(a, "--game") && v) { game = v; i++; }
+        else if (!strcmp(a, "--record") && v) { g_record_path = v; i++; }
+        else if (!strcmp(a, "--frames") && v) { g_max_frames = strtol(v, NULL, 0); i++; }
+        else if (!strcmp(a, "--watchdog") && v) { g_watchdog_secs = strtol(v, NULL, 0); i++; }
+        else if (!strcmp(a, "--click") && v) { _putenv_s("MCG_CLICK", v); i++; }
+        else { fputs(USAGE, stderr); return 2; }
+    }
+    /* Resolved before the chdir below, so it lands where the caller meant. */
+    static char rec[MAX_PATH];
+    if (g_record_path && GetFullPathNameA(g_record_path, MAX_PATH, rec, NULL))
+        g_record_path = rec;
+    /* The engine opens everything relative to its own folder, as it did
+     * installed: so that is where it runs. */
+    if (!SetCurrentDirectoryA(game)) {
+        fprintf(stderr, "[runtime] no game folder at %s: run Setup.cmd, or pass "
+                "--game DIR\n", game);
+        return 1;
+    }
+    const char* image = "MCX.EXE";
 
     uint32_t span = recomp_load_image(image, MCG_IMAGE_BASE);
     if (!span) {
@@ -1480,9 +1536,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    for (int i = 1; i < argc; i++)
-        if (!strcmp(argv[i], "--selftest"))
-            return crt_selftest();
+    if (selftest)
+        return crt_selftest();
+    if (!run) {
+        printf("(dry run: image mapped and bound; --run enters 0x%08X)\n", MCG_ENTRY);
+        return 0;
+    }
 
     watch_init();
     start_watchdog();

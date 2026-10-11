@@ -52,6 +52,13 @@ extern const uint32_t mcg_dyn_export_count;
 /* VA for (module, proc), or 0 if we do not implement it. */
 uint32_t mcg_dyn_resolve(const char* module, const char* proc);
 
+/* Command-line options (recomp_runtime.c main), read by the shims and the
+ * presenter. */
+extern int g_headless;               /* --headless: never shown, never focused */
+extern const char* g_record_path;    /* --record out.mp4 */
+extern long g_max_frames;            /* --frames N: exit after N presents */
+void mcg_quit(int code);             /* close the recording, then exit */
+
 /* Generated bridge tables (imports_gen.c). */
 extern const recomp_dispatch_entry_t mcg_import_bridges[];
 extern const uint32_t mcg_import_bridge_count;

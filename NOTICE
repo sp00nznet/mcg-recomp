@@ -1,0 +1,22 @@
+The MIT licence in LICENSE covers what is actually ours in this repository:
+the setup and build scripts, the tools, the hand-written runtime and the
+documentation. It does NOT cover MechCommander Gold itself.
+
+MechCommander Gold and MechCommander: Desperate Measures are (c) 1998-1999
+FASA Interactive / MicroProse; MechCommander and BattleTech are trademarks of
+their respective owners. Its executables, data, art, sound and movies are not
+in this repository and are excluded by .gitignore.
+
+Two consequences worth being explicit about:
+
+  * You need your own copy of the game to use any of this. Setup.cmd copies
+    your copy into game/; the pipeline reads it from there.
+
+  * Lifted code is a derivative work of the binary it came from. Anything this
+    pipeline emits into work/, src/recomp/gen/ or src/runtime/imports_gen.c
+    carries whatever licence the original carries, not this one. The MIT grant
+    stops at our own work.
+
+No third-party source code is included in this repository. The pcrecomp
+toolkit (MIT, https://github.com/sp00nznet/pcrecomp) is referenced as a
+separate checkout, not copied in.

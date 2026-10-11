@@ -1,0 +1,49 @@
+# Changelog
+
+All notable changes to this project. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+versions follow [SemVer](https://semver.org/).
+
+## [Unreleased]
+
+### Added
+- `Setup.cmd`: one double-click from a plain download to a playable build. It
+  checks Python, pefile/capstone, pcrecomp and Visual Studio (asking before
+  installing any), copies your copy of the game from a drive, folder, `.iso`
+  or `.zip` into `game\`, lifts, builds, and leaves a shortcut.
+- `build.cmd`: the MSVC x64 + Ninja build without opening a developer prompt.
+- The house command line: `--run`, `--game DIR`, `--headless`,
+  `--record out.mp4`, `--frames N`, `--watchdog S`, `--click SPEC`. Without
+  `--run` the host maps and binds the image and stops.
+- `--headless`: a DWM-cloaked window that never reaches a screen or takes
+  focus; the real keyboard and mouse are ignored, only scripted input counts.
+- `--record`: the presented frames piped to ffmpeg at 30 fps, paced by the
+  wall clock, from the frame buffer rather than the screen.
+- `[mission] state A -> B` in the log whenever `Mission::run` changes state.
+- `tools/conformance.py` and `conformance.json`: milestones of a headless run
+  that starts a mission, the self-test count and lift health, against a
+  baseline that fails on regression.
+- CI: the Python compiles, `cv_extract`'s and the lifter's self-tests where they
+  need no game, and the conformance harness's no-corpus path.
+- `docs/architecture.md`, `docs/bringup.md`, `docs/toolkit.md`, `ROADMAP.md`,
+  `NOTICE`.
+
+### Changed
+- The game lives in `game\` instead of the repository root, and the host runs
+  there (`--game` to point elsewhere).
+- Everything derived from `MCX.EXE` (the CodeView function table, symbol and
+  module maps, FPO records, lift statistics) is written to gitignored `work\`
+  instead of `config\` and `analysis\`.
+- The toolkit is found through `PCRECOMP`, else `..\tools`, instead of a fixed
+  path. Built against pcrecomp `main` (`8f4aa77`): no unmerged toolkit change is
+  needed any more.
+- `gen_imports.py` is now in the repository; the build needed it and it was
+  never committed.
+
+### Removed
+- `config/functions.json` and `analysis/*.json` from the repository: they are
+  symbol maps reconstructed from the binary (REPO_RULES section 3). Run
+  `tools/cv_extract.py` to produce them locally.
+
+### Fixed
+- Link error against current pcrecomp: the runtime now defines
+  `g_icall_from`, which `recomp_types.h` declares for trace builds.

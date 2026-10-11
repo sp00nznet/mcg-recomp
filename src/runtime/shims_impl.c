@@ -22,6 +22,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <dwmapi.h>
 
 #include "recomp_types.h"
 #include "imports.h"
@@ -1312,6 +1313,13 @@ void imp_CreateWindowExA(void) {
         g_last_error = GetLastError();
         fprintf(stderr, "[win] CreateWindowExA failed (%u)\n", g_last_error);
     }
+    /* --headless: DWM cloaks the window, so it exists, gets messages and is
+     * painted into, but never reaches a screen. It works the same at the
+     * console and over RDP, and never takes focus from whoever is working. */
+    if (h && g_headless) {
+        BOOL cloak = TRUE;
+        DwmSetWindowAttribute(h, DWMWA_CLOAK, &cloak, sizeof cloak);
+    }
     RET(h ? h_put(h) : 0);
     STDRET(12);
 }
@@ -1329,9 +1337,22 @@ void imp_DefWindowProcA(void) {
 }
 
 void imp_DestroyWindow(void) { RET(DestroyWindow(HWND_OF(ARG(0))) ? 1 : 0); STDRET(1); }
-void imp_ShowWindow(void)    { RET(ShowWindow(HWND_OF(ARG(0)), (int)ARG(1)) ? 1 : 0); STDRET(2); }
-void imp_SetFocus(void)      { RET(h_put(SetFocus(HWND_OF(ARG(0))))); STDRET(1); }
-void imp_SetForegroundWindow(void) { RET(SetForegroundWindow(HWND_OF(ARG(0))) ? 1 : 0); STDRET(1); }
+/* Headless, nothing activates: showing is SW_SHOWNOACTIVATE and focus
+ * requests succeed without moving the real focus. */
+void imp_ShowWindow(void) {
+    int cmd = (int)ARG(1);
+    if (g_headless && cmd != SW_HIDE) cmd = SW_SHOWNOACTIVATE;
+    RET(ShowWindow(HWND_OF(ARG(0)), cmd) ? 1 : 0);
+    STDRET(2);
+}
+void imp_SetFocus(void) {
+    RET(g_headless ? ARG(0) : h_put(SetFocus(HWND_OF(ARG(0)))));
+    STDRET(1);
+}
+void imp_SetForegroundWindow(void) {
+    RET(g_headless || SetForegroundWindow(HWND_OF(ARG(0))) ? 1 : 0);
+    STDRET(1);
+}
 void imp_EnableWindow(void)  { RET(EnableWindow(HWND_OF(ARG(0)), (BOOL)ARG(1)) ? 1 : 0); STDRET(2); }
 void imp_SetWindowTextA(void){ RET(SetWindowTextA(HWND_OF(ARG(0)), (LPCSTR)simp(ARG(1))) ? 1 : 0); STDRET(2); }
 void imp_PostQuitMessage(void) { PostQuitMessage((int)ARG(0)); STDRET(1); }
@@ -1470,10 +1491,15 @@ void imp_GetAsyncKeyState(void) {
         STDRET(1);
         return;
     }
-    RET((uint32_t)(uint16_t)GetAsyncKeyState((int)ARG(0)));
+    /* Headless, the real keyboard and mouse belong to whoever is at the
+     * machine: only scripted input counts. */
+    RET(g_headless ? 0 : (uint32_t)(uint16_t)GetAsyncKeyState((int)ARG(0)));
     STDRET(1);
 }
-void imp_GetKeyState(void)   { RET((uint32_t)(uint16_t)GetKeyState((int)ARG(0))); STDRET(1); }
+void imp_GetKeyState(void) {
+    RET(g_headless ? 0 : (uint32_t)(uint16_t)GetKeyState((int)ARG(0)));
+    STDRET(1);
+}
 void imp_GetCaretBlinkTime(void) { RET(GetCaretBlinkTime()); STDRET(0); }
 void imp_GetMessagePos(void) { RET(GetMessagePos()); STDRET(0); }
 void imp_RegisterWindowMessageA(void) { RET(RegisterWindowMessageA((LPCSTR)simp(ARG(0)))); STDRET(1); }
@@ -1500,6 +1526,7 @@ void imp_GetCursorPos(void) {
     if (pinned < 0) {
         const char* e = getenv("MCG_CURSOR");
         pinned = (e && sscanf(e, "%d,%d", &pin_x, &pin_y) == 2);
+        if (!pinned && g_headless) { pinned = 1; pin_x = 320; pin_y = 240; }
     }
     if (click_now(&sx, &sy)) {            /* scripted: already engine space */
         p.x = sx;
@@ -1656,6 +1683,17 @@ volatile uint32_t g_n_peek, g_n_dispatch, g_n_wndproc;
 void imp_PeekMessageA(void) {
     g_n_peek++;
     service_timer();
+    /* Mission::run is a jump table on this->state (the object at 0x8087A8):
+     * 10 plays the intro movies, 3 is the logistics shell, 7 a mission. A
+     * change is logged once, here on the main thread, so the conformance
+     * harness reads stages from the log instead of sampling for them. */
+    { static int last = -1;
+      uint32_t mission = MEM32(0x008087A8u);
+      int st = mission ? (int)MEM32(mission) : -1;
+      if (st != last) {
+          fprintf(stderr, "[mission] state %d -> %d\n", last, st);
+          last = st;
+      } }
     MSG m;
     BOOL got = PeekMessageA(&m, HWND_OF(ARG(1)), ARG(2), ARG(3), ARG(4));
     if (got) msg_out(ARG(0), &m);
@@ -1995,8 +2033,7 @@ void imp_MessageBoxA(void) {
 void imp_ExitProcess(void) {
     fprintf(stderr, "[runtime] ExitProcess(%u) after %u indirect calls\n",
             ARG(0), g_icall_count);
-    fflush(NULL);
-    ExitProcess(ARG(0));
+    mcg_quit((int)ARG(0));
 }
 
 void imp_TerminateProcess(void) {
