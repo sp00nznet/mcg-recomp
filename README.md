@@ -1,6 +1,6 @@
 # MechCommander Gold — Static Recompilation
 
-![In mission: terrain, water, forest, the HUD and the deployed lance](docs/images/mission.png)
+![The first move order: a 'Mech selected on the mech bar walks to a point clicked on open ground](docs/images/first-move.gif)
 
 Static recompilation of **MechCommander Gold** / *Desperate Measures*
 (1998–99, FASA Interactive / MicroProse), from its shipping `MCX.EXE` to C
@@ -10,7 +10,7 @@ Built on the [pcrecomp](https://github.com/sp00nznet/pcrecomp) toolchain and
 following its shared house style (layout, CLI, conformance harness, headless
 mode).
 
-## Status: **v0.1.0-dev, alpha. Boots, plays the menus, and launches the first campaign mission, recompiled throughout. Units cannot be ordered to move yet.**
+## Status: **v0.1.0-dev, alpha. Boots, plays the menus, and plays the first campaign mission far enough to give orders: a 'Mech selected and sent across the map walks there. Recompiled throughout.**
 
 | Stage | State |
 |---|---|
@@ -21,11 +21,11 @@ mode).
 | Host (`build/mcg_recomp.exe`, x64) | maps the image at its own addresses; Win32 forwarded to the host, DirectDraw/DirectSound/DirectPlay mocked as COM objects in simulated memory |
 | Graphics | the engine's own software renderer, 8bpp shell and 16bpp mission, presented into a framed window |
 | Intro, main menu, campaign shell | **run**: New Campaign, briefing, deployment (drag 'Mechs into force groups), launch |
-| Mission | **runs**: terrain, water, forest, units, HUD, radar, selection. **Move orders are not accepted yet** |
+| Mission | **runs**: terrain, water, forest, units, HUD, radar. **Selection and move orders work**; combat and mission end not yet tried |
 | Sound | silent: DirectSound buffers are filled by the engine but not played |
 | Movies | not decoded: each Smacker movie ends immediately |
 | Headless mode | `--headless --record out.mp4`, with `--click` for scripted input. Never shows or activates a window |
-| Conformance harness | **12/12** milestones (boot to a running mission, headless), **31/31** self-tests, 0 lift errors ([tools/conformance.py](tools/conformance.py)) |
+| Conformance harness | **13/13** milestones (boot to a mission and a move order, headless), **31/31** self-tests, 0 lift errors ([tools/conformance.py](tools/conformance.py)) |
 
 ## Screenshots
 
@@ -34,6 +34,7 @@ Real output of `build\mcg_recomp.exe`, recompiled code throughout:
 | | |
 |---|---|
 | ![the main menu](docs/images/main-menu.png) | ![briefing and deployment: a 'Mech in Force Group 1, the tactical map](docs/images/deployment.png) |
+| ![in mission: terrain, water, forest, the HUD and the deployed lance](docs/images/mission.png) | |
 
 ## What is not in this repo
 
@@ -145,7 +146,8 @@ py -3 tools\conformance.py                                    # milestones, self
 ```
 
 The third line plays New Campaign, deploys the lance and launches the first
-mission with nobody at the keyboard.
+mission with nobody at the keyboard; add `;15,1005@115;820,430@122` and the
+first 'Mech is selected and walks to open ground.
 
 | Flag | |
 |---|---|
@@ -170,6 +172,11 @@ Steps 3 to 6 above. `PCRECOMP` (Python) and `-DPCRECOMP=` (CMake, through
 `..\tools`; the lifter and the runtime must come from the same tree
 ([docs/toolkit.md](docs/toolkit.md)). The bring-up trace build is
 `set BUILD_DIR=build-trace & set CMAKE_ARGS=-DCMAKE_C_FLAGS=-DRECOMP_TRACE & build.cmd`.
+
+On a [recomp-netlab](https://github.com/sp00nznet/recomp-netlab) farm,
+`netlab build mcg` builds the same tree with clang-cl in about three minutes
+(the recipe sends the generated C, never `game/` or `work/`), and
+`netlab qa mcg` runs the conformance harness against it.
 
 How the pieces fit is [docs/architecture.md](docs/architecture.md); what it
 took to get this far, and what was ruled out, is

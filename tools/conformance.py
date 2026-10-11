@@ -33,10 +33,13 @@ GEN = os.path.join(ROOT, 'src', 'recomp', 'gen')
 BASELINE = os.path.join(ROOT, 'conformance.json')
 
 # New Campaign (three clicks: the menu, then two confirmations), three drags
-# from the Ready Area into the force groups, then launch. Seconds from the
-# logistics shell coming up, which is when the host starts the script.
+# from the Ready Area into the force groups, then launch. Then, in the mission
+# (1280x1024), select the first 'Mech on the mech bar and click open ground up
+# and to the right of the lance. Seconds from the logistics shell coming up,
+# which is when the host starts the script.
 CLICKS = ('477,165@8;477,165@18;477,165@28;37,376>248,61@45;'
-          '37,376>304,61@55;37,376>246,172@65;570,339@78;570,339@90')
+          '37,376>304,61@55;37,376>246,172@65;570,339@78;570,339@90;'
+          '15,1005@115;820,430@122')
 SECONDS = 170
 
 # (name, what the host prints when it is reached). Order is boot order.
@@ -48,8 +51,10 @@ MILESTONES = [
     ('display mode set', r'\[ddraw\] SetDisplayMode2 1280x1024 8bpp'),
     ('first frame presented', r'\[capture\] frame 1 presented'),
     ('intro sequence done: the logistics shell', r'\[mission\] state \d+ -> 3'),
-    ('scripted clicks all delivered', r'\[input\] firing 7 '),
     ('a mission launches', r'\[mission\] state 3 -> 7'),
+    ('scripted clicks all delivered', r'\[input\] firing 9 '),
+    ('a click on open ground is a player order',
+     r'(?s)\[input\] firing 9 .*\[engine\] Parser::SendTacOrder'),
     ('1000 frames', r'\[capture\] frame 1000 presented'),
     ('still in the mission at the time limit',
      r'(?s)\[mission\] state 3 -> 7(?:(?!\[mission\] state 7 -> ).)*\[watchdog\] \d+ s: stopping'),

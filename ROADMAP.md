@@ -6,10 +6,8 @@ Each milestone lands with a conformance milestone and a note in `docs/`.
 
 ## 1. Play a mission
 
-- **A move order the engine accepts.** Selection works and an order onto
-  impassable ground is refused with the red-X cursor, so input reaches the
-  simulation. Find a destination the engine itself calls passable (ask its map,
-  don't guess pixels), issue it, and check the 'Mech's position changes.
+- ~~A move order the engine accepts~~: done. Next, check it in the harness by
+  position, not only by `Parser::SendTacOrder` being called.
 - **Combat**: attack an enemy, take damage, a unit destroyed.
 - **Mission end**: objectives complete, the debriefing and salvage screens.
 - **The third drag**: the scripted deployment lands two 'Mechs of three.
@@ -35,9 +33,6 @@ Each milestone lands with a conformance milestone and a note in `docs/`.
 
 ## 4. Housekeeping
 
-- **netlab**: the recipe builds on the farm once its clang-cl builder handles a
-  64-bit host with 1.5M lines of generated C; until then the local
-  `build.cmd` is the build.
 - Screenshots of a mission in motion (a GIF from `--record`).
 
 ## Out of scope

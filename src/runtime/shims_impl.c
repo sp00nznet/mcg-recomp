@@ -1381,7 +1381,7 @@ void imp_GetSystemMetrics(void) { RET((uint32_t)GetSystemMetrics((int)ARG(0))); 
 #define DRAG_HOLD_MS    900      /* ...and this long for a drag */
 #define CLICK_HOVER_MS  600      /* pointer parked this long either side */
 
-static struct { int x, y, x2, y2, drag; unsigned at_ms; } g_clicks[8];
+static struct { int x, y, x2, y2, drag; unsigned at_ms; } g_clicks[16];
 static int g_click_n = -1;
 static DWORD g_start_ms;
 
@@ -1390,7 +1390,7 @@ static void clicks_init(void) {
     g_click_n = 0;
     g_start_ms = 0;            /* set when the logistics shell comes up */
     if (!s) return;
-    while (*s && g_click_n < 8) {
+    while (*s && g_click_n < 16) {
         int x, y, x2, y2; double t;
         if (sscanf(s, "%d,%d>%d,%d@%lf", &x, &y, &x2, &y2, &t) == 5) {
             g_clicks[g_click_n].drag = 1;
@@ -1512,7 +1512,15 @@ void imp_SetRect(void)       { RET(SetRect((LPRECT)simp(ARG(0)), (int)ARG(1), (i
 void imp_PtInRect(void)      { POINT p = { (LONG)ARG(1), (LONG)ARG(2) }; RET(PtInRect((const RECT*)simp(ARG(0)), p) ? 1 : 0); STDRET(3); }
 void imp_IntersectRect(void) { RET(IntersectRect((LPRECT)simp(ARG(0)), (const RECT*)simp(ARG(1)), (const RECT*)simp(ARG(2))) ? 1 : 0); STDRET(3); }
 void imp_AdjustWindowRect(void) { RET(AdjustWindowRect((LPRECT)simp(ARG(0)), ARG(1), (BOOL)ARG(2)) ? 1 : 0); STDRET(3); }
-void imp_ClientToScreen(void){ RET(ClientToScreen(HWND_OF(ARG(0)), (LPPOINT)simp(ARG(1))) ? 1 : 0); STDRET(2); }
+/*
+ * Screen <-> client is the identity, on purpose. The engine believes it owns a
+ * fullscreen display whose origin is the window's, and GetCursorPos already
+ * hands it points in that space (ddraw_map_cursor). Forwarding these to
+ * Windows subtracted the framed window's desktop position a second time:
+ * every mission click, which goes GetCursorPos -> MapWindowPoints(NULL, hwnd)
+ * in UpdateMouseState, landed ~48 px left and ~70 px above where it was aimed.
+ */
+void imp_ClientToScreen(void) { RET(1); STDRET(2); }
 void imp_GetCursorPos(void) {
     POINT p = { 0, 0 };
     BOOL ok = TRUE;
@@ -1550,7 +1558,7 @@ void imp_GetCursorPos(void) {
  * own. */
 void imp_ClipCursor(void)    { RET(1); STDRET(1); }
 void imp_SetCursorPos(void)  { RET(1); STDRET(2); }
-void imp_MapWindowPoints(void) { RET((uint32_t)MapWindowPoints(HWND_OF(ARG(0)), HWND_OF(ARG(1)), (LPPOINT)simp(ARG(2)), ARG(3))); STDRET(4); }
+void imp_MapWindowPoints(void) { RET(0); STDRET(4); }   /* identity: see ClientToScreen; 0 = no offset */
 void imp_InvalidateRect(void) { RET(InvalidateRect(HWND_OF(ARG(0)), (const RECT*)simp(ARG(1)), (BOOL)ARG(2)) ? 1 : 0); STDRET(3); }
 
 void imp_SetWindowPos(void) {

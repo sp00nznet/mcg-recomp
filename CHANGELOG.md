@@ -6,6 +6,13 @@ versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Move orders work**: select a 'Mech, click open ground, and it walks there.
+  The conformance run now does exactly that (13/13).
+- `LOG_CALLS` in `run_pipeline.py`: a lifted function can print a line on
+  each of its first 20 calls (`Parser::SendTacOrder` does), which is how the
+  harness sees a player order happen. Direct calls never reach
+  `recomp_lookup_manual()`, so this lives in the generated body.
+- `--click` takes up to 16 steps (was 8).
 - `Setup.cmd`: one double-click from a plain download to a playable build. It
   checks Python, pefile/capstone, pcrecomp and Visual Studio (asking before
   installing any), copies your copy of the game from a drive, folder, `.iso`
@@ -24,6 +31,8 @@ versions follow [SemVer](https://semver.org/).
   baseline that fails on regression.
 - CI: the Python compiles, `cv_extract`'s and the lifter's self-tests where they
   need no game, and the conformance harness's no-corpus path.
+- A recomp-netlab recipe (`mcg`): clang-cl builds the tree on the farm in
+  about three minutes, and that build passes the harness 12/12 as well.
 - `docs/architecture.md`, `docs/bringup.md`, `docs/toolkit.md`, `ROADMAP.md`,
   `NOTICE`.
 
@@ -45,5 +54,11 @@ versions follow [SemVer](https://semver.org/).
   `tools/cv_extract.py` to produce them locally.
 
 ### Fixed
+- Every mission click landed about 48 px left and 70 px above where it was
+  aimed. `GetCursorPos` already answers in the engine's own screen space, and
+  `MapWindowPoints`/`ClientToScreen` were forwarded to Windows, which
+  subtracted the framed window's desktop position a second time. Both are the
+  identity now: to the engine, its window IS the screen.
+- `ddraw.c` redefined the SDK's `E_NOINTERFACE` (a `/WX` error in CI).
 - Link error against current pcrecomp: the runtime now defines
   `g_icall_from`, which `recomp_types.h` declares for trace builds.

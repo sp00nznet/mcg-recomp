@@ -92,6 +92,14 @@ OVERRIDES = {
     0x006BB4D0: 'ObjectMap::addObject -- report the map cell index it derives',
 }
 
+# Functions that print a line each of the first 20 times they run, so the
+# conformance harness can see a stage of play happen without a debugger. A
+# direct call never consults recomp_lookup_manual(), so this is done in the
+# generated body itself. Costs one static test per call.
+LOG_CALLS = {
+    0x006D3B90: 'Parser::SendTacOrder: the player gave an order',
+}
+
 
 # --------------------------------------------------------------------------
 def c_name(entry):
@@ -258,6 +266,9 @@ def lift_function(lifter, name, insns, leaders):
     # instead of saying sub_00000000. Free unless -DRECOMP_TRACE, which also
     # keeps the last 1024 entries as a backtrace.
     lines.append(f'    RECOMP_ENTER(0x{insns[0].address:08X}u);' if insns else '')
+    if insns and insns[0].address in LOG_CALLS:
+        lines.append('    { static int _n; if (_n < 20) '
+                     f'fprintf(stderr, "[engine] {LOG_CALLS[insns[0].address]} (#%d)\\n", ++_n); }}')
     lines.append('')
     lifter._flag_state = None
     # A function containing an indirect jump needs a label on EVERY instruction,

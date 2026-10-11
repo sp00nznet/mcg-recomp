@@ -206,6 +206,37 @@ New Campaign, three drags from the Ready Area into force groups, then launch.
 by default), because a real pointer resting near a screen edge scrolls the
 battlefield.
 
+## Move orders: the click was in the wrong place
+
+For days no move order was accepted, and the red-X cursor looked like the
+engine refusing impassable ground. It was not refusing anything. In a mission,
+`InterfaceObject::UpdateMouseState` (`0x006D0EB0`) reads the pointer with
+`GetCursorPos` and then converts it with `MapWindowPoints(NULL, hwnd)`
+(`0x006D0F03`-`0x006D0F25`). The `GetCursorPos` shim already answers in the
+engine's own screen coordinates, and `MapWindowPoints` was forwarded to
+Windows, which subtracted the framed window's position on the desktop again:
+every click landed about 48 px left and 70 px above its target, so a click
+aimed at grass tested a cell somewhere else. Both conversions are the identity
+now. To the engine its window is the whole screen.
+
+What the path looks like, for the next person (static reading, confirmed by
+the run):
+
+- Buttons are **polled**: `CheckMouse` (`0x006127E0`) calls `GetAsyncKeyState`
+  for Alt/Ctrl/Shift and both buttons every frame and turns edges into events
+  (1 left down, 4 left up, 3 right down, 6 right up, 7 move). Button window
+  messages are ignored except double-clicks.
+- The order fires on **left release** over bare terrain (object class 7): the
+  click goes through `Camera::inverseProject`, then
+  `TacticalOrder::init(..., MOVETO_POINT)` and `Parser::SendTacOrder`
+  (`0x006D3B90`). There is no passability test on that path; the red X comes
+  from `ScenarioMap::cellPassable` in `UpdateMouseState` and is only a cursor.
+  Moving more than a few pixels between down and up makes it a drag-select.
+  Right click deselects.
+- `MechWarrior::setMoveGoal` is called by the AI for every unit at mission
+  start, so it is no signal that the *player's* order arrived;
+  `Parser::SendTacOrder` is.
+
 ## Ruled out, do not retry
 
 1. `FitIniFile::textToLong` returning bad counts: all self-test cases pass.
@@ -219,10 +250,6 @@ battlefield.
 
 ## Open
 
-- **No move order has been accepted yet.** Selecting a 'Mech works and an order
-  onto impassable ground is refused with the engine's own red-X cursor, so
-  input reaches the simulation. What is missing is a valid destination: ask the
-  engine which terrain it considers passable rather than guessing pixels.
 - The intro Smacker movies are not decoded (`SmackOpen` returns a one-frame
   movie that has already finished).
 - The `__sbh_alloc_block` fault above.
