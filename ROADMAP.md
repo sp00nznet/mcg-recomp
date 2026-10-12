@@ -10,7 +10,9 @@ Each milestone lands with a conformance milestone and a note in `docs/`.
   position, not only by `Parser::SendTacOrder` being called.
 - ~~Combat~~: done. A 'Mech engages an armored car on its own and destroys it.
   Next: an explicit attack order (click an enemy), and a 'Mech lost.
-- **Mission end**: objectives complete, the debriefing and salvage screens.
+- ~~Mission end~~: done. Mission 1 plays through to the debriefing.
+  Next: NEXT MISSION, the salvage and the logistics screens between
+  missions, and mission 2.
 - **The third drag**: the scripted deployment lands two 'Mechs of three.
 
 ## 2. Sound and movies

@@ -6,6 +6,18 @@ versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Mission 1 plays through to "MISSION SUCCESSFUL"**: Camp Alpha's HQ and gas
+  tower, the three Garrison buildings, Camp Beta's guard and HQ, then the
+  debriefing with its statistics, objectives and salvage. Attack orders,
+  objectives and the end of a mission all ran with nothing to fix.
+- `tools/conformance.py --playthrough`: plays it unattended (~18 minutes) and
+  scores the three objectives and the debriefing.
+- `--click` types text with `:text@t` (posted as `WM_CHAR`, which is how the
+  engine reads typed characters, its cheat codes included), and takes 24
+  steps.
+- `MCG_PEEKF=0xADDR[,N]`: N simulated floats on each watchdog line.
+- `LOG_CALLS` entries can print arguments: an order's code and world goal,
+  objective status changes, the part ID of whatever is destroyed.
 - **Combat works**: in the first campaign mission a 'Mech sent down to the
   road meets an armored car, fires, and destroys it, entirely in the engine's
   own code; nothing needed fixing. The conformance run now does exactly that

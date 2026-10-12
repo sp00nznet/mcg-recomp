@@ -5,5 +5,7 @@
  "selftest_of": 31,
  "lifted": 6065,
  "errors": 0,
- "unimplemented": 14
+ "unimplemented": 14,
+ "playthrough": 7,
+ "playthrough_of": 7
 }

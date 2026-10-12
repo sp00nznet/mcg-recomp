@@ -97,7 +97,10 @@ OVERRIDES = {
 # direct call never consults recomp_lookup_manual(), so this is done in the
 # generated body itself. Costs one static test per call.
 LOG_CALLS = {
-    0x006D3B90: 'Parser::SendTacOrder: the player gave an order',
+    # TacticalOrder is passed by value: [esp+28] is its code, [esp+40] and
+    # [esp+44] the world x,y of its goal (floats).
+    0x006D3B90: ('Parser::SendTacOrder: the player gave an order, code %u, goal (%.0f,%.0f)',
+                 'MEM32(esp + 28), (double)MEMF(esp + 40), (double)MEMF(esp + 44)'),
     0x006A9A10: 'MechWarrior::orderAttackObject',
     0x0067FF00: 'BattleMech::fireWeapon',
     0x006703A0: 'GroundVehicle::fireWeapon',
@@ -105,9 +108,15 @@ LOG_CALLS = {
     0x0067F940: 'BattleMech::handleWeaponHit',
     0x006700D0: 'GroundVehicle::handleWeaponHit',
     0x006A15C0: 'Turret::handleWeaponHit',
-    0x006535B0: 'Building::handleWeaponHit',
-    0x00675F80: 'BattleMechType::handleDestruction',
-    0x0066A120: 'GroundVehicleType::handleDestruction',
+    0x00675F80: ('BattleMechType::handleDestruction: part %08X', 'MEM32(MEM32(esp + 4) + 12)', 'dedupe'),
+    0x0066A120: ('GroundVehicleType::handleDestruction: part %08X', 'MEM32(MEM32(esp + 4) + 12)', 'dedupe'),
+    0x00652010: ('BuildingType::handleDestruction: part %08X', 'MEM32(MEM32(esp + 4) + 12)', 'dedupe'),
+    0x00653BE0: ('MiscTerrainObjectType::handleDestruction: part %08X', 'MEM32(MEM32(esp + 4) + 12)', 'dedupe'),
+    0x006987E0: ('TerrainObjectType::handleDestruction: part %08X', 'MEM32(MEM32(esp + 4) + 12)', 'dedupe'),
+    0x00695710: ('TreeBuildingType::handleDestruction: part %08X', 'MEM32(MEM32(esp + 4) + 12)', 'dedupe'),
+    0x006AAF30: 'MechWarrior::handleKilledTarget',
+    0x00737EB0: ('Scenario::setObjectiveStatus: objective %u -> %u (1 success, 2 failed)',
+                 'MEM32(esp + 4), MEM32(esp + 8)'),
     0x0072BC20: 'Mission::EndScenario',
 }
 
@@ -278,8 +287,19 @@ def lift_function(lifter, name, insns, leaders):
     # keeps the last 1024 entries as a backtrace.
     lines.append(f'    RECOMP_ENTER(0x{insns[0].address:08X}u);' if insns else '')
     if insns and insns[0].address in LOG_CALLS:
-        lines.append('    { static int _n; if (_n < 20) '
-                     f'fprintf(stderr, "[engine] {LOG_CALLS[insns[0].address]} (#%d)\\n", ++_n); }}')
+        # A value is a message, or (message with printf fields, C arguments
+        # [, 'dedupe']). With 'dedupe' a call whose first argument repeats the
+        # last one is not printed: an object's handleDestruction runs every
+        # frame while it burns.
+        v = LOG_CALLS[insns[0].address]
+        msg, args, key = v, '', '0'
+        if isinstance(v, tuple):
+            msg, args = v[0], ', ' + v[1]
+            if len(v) > 2:
+                key = v[1].split(', ')[0]
+        lines.append(f'    {{ static int _n; static uint32_t _last = 0xFFFFFFFFu; uint32_t _k = {key}; '
+                     'if (_n < 20 && (_k != _last || !_k)) { ++_n; _last = _k; '
+                     f'fprintf(stderr, "[engine] {msg} (#%d)\\n"{args}, _n); }} }}')
     lines.append('')
     lifter._flag_state = None
     # A function containing an indirect jump needs a label on EVERY instruction,

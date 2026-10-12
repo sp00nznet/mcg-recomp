@@ -1260,6 +1260,8 @@ void imp_RegisterClassA(void) {
     STDRET(1);
 }
 
+static HWND g_game_hwnd;    /* the first top-level window: typed text goes here */
+
 void imp_CreateWindowExA(void) {
     /* hMenu and lpParam pass as NULL: a menu would be a simulated handle with
      * no host object behind it, and lpParam only reaches the game again inside
@@ -1316,6 +1318,7 @@ void imp_CreateWindowExA(void) {
     /* --headless: DWM cloaks the window, so it exists, gets messages and is
      * painted into, but never reaches a screen. It works the same at the
      * console and over RDP, and never takes focus from whoever is working. */
+    if (h && !g_game_hwnd && !(style & WS_CHILD)) g_game_hwnd = h;
     if (h && g_headless) {
         BOOL cloak = TRUE;
         DwmSetWindowAttribute(h, DWMWA_CLOAK, &cloak, sizeof cloak);
@@ -1365,6 +1368,8 @@ void imp_GetSystemMetrics(void) { RET((uint32_t)GetSystemMetrics((int)ARG(0))); 
  * Scripted input.
  *
  * MCG_CLICK="x,y@t;x,y@t;..." clicks engine point (x,y) t seconds after start.
+ * ":text@t" types text instead (WM_CHAR, which is how the engine reads typed
+ * characters, cheat codes included).
  *
  * Driving the menus from outside does not work: the engine reads the pointer
  * with GetCursorPos and the buttons with GetAsyncKeyState, and a posted
@@ -1381,7 +1386,7 @@ void imp_GetSystemMetrics(void) { RET((uint32_t)GetSystemMetrics((int)ARG(0))); 
 #define DRAG_HOLD_MS    900      /* ...and this long for a drag */
 #define CLICK_HOVER_MS  600      /* pointer parked this long either side */
 
-static struct { int x, y, x2, y2, drag; unsigned at_ms; } g_clicks[16];
+static struct { int x, y, x2, y2, drag; unsigned at_ms; char text[32]; int sent; } g_clicks[24];
 static int g_click_n = -1;
 static DWORD g_start_ms;
 
@@ -1390,8 +1395,19 @@ static void clicks_init(void) {
     g_click_n = 0;
     g_start_ms = 0;            /* set when the logistics shell comes up */
     if (!s) return;
-    while (*s && g_click_n < 16) {
+    while (*s && g_click_n < 24) {
         int x, y, x2, y2; double t;
+        char text[32];
+        if (sscanf(s, ":%31[^@]@%lf", text, &t) == 2) {
+            strcpy(g_clicks[g_click_n].text, text);
+            g_clicks[g_click_n].at_ms = (unsigned)(t * 1000.0);
+            fprintf(stderr, "[input] scripted text %d: \"%s\" at %.1fs\n", g_click_n, text, t);
+            g_click_n++;
+            s = strchr(s, ';');
+            if (!s) break;
+            s++;
+            continue;
+        }
         if (sscanf(s, "%d,%d>%d,%d@%lf", &x, &y, &x2, &y2, &t) == 5) {
             g_clicks[g_click_n].drag = 1;
         } else if (sscanf(s, "%d,%d@%lf", &x, &y, &t) == 3) {
@@ -1444,6 +1460,15 @@ static int click_now(int* x, int* y) {
     unsigned now = GetTickCount() - g_start_ms;
     for (int i = 0; i < g_click_n; i++) {
         unsigned at = g_clicks[i].at_ms;
+        if (g_clicks[i].text[0]) {
+            if (now >= at && !g_clicks[i].sent && g_game_hwnd) {
+                g_clicks[i].sent = 1;
+                fprintf(stderr, "[input] typing %d: \"%s\"\n", i, g_clicks[i].text);
+                for (const char* c = g_clicks[i].text; *c; c++)
+                    PostMessageA(g_game_hwnd, WM_CHAR, (WPARAM)(unsigned char)*c, 1);
+            }
+            continue;
+        }
         unsigned hold = g_clicks[i].drag ? DRAG_HOLD_MS : CLICK_HOLD_MS;
         if (now + CLICK_HOVER_MS < at || now > at + hold + CLICK_HOVER_MS)
             continue;

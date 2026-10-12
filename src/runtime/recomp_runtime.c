@@ -461,6 +461,23 @@ static DWORD WINAPI watchdog(LPVOID unused) {
                 sys ? (int)MEM32(sys + 0xAECu) : -1, list, head,
                 mechs[0] ? mechs : " none", gate, ready,
                 same ? "  (PC unchanged)" : "");
+        /* MCG_PEEKF=0xADDR[,N]: N simulated floats (default 1) on each line. */
+        {
+            const char* s = getenv("MCG_PEEKF");
+            if (s) {
+                char* e;
+                uint32_t a = (uint32_t)strtoul(s, &e, 0);
+                int cnt = *e == ',' ? atoi(e + 1) : 1;
+                fprintf(stderr, "[peek] %08X:", a);
+                for (int i = 0; i < cnt && i < 64; i++) {
+                    uint32_t v = MEM32(a + 4u * (uint32_t)i);
+                    float f;
+                    memcpy(&f, &v, 4);
+                    fprintf(stderr, " %g", f);
+                }
+                fprintf(stderr, "\n");
+            }
+        }
         if (same) {
             uint32_t n = g_callstack_n < CALLSTACK_MAX
                        ? g_callstack_n : CALLSTACK_MAX;

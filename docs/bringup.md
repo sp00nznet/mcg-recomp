@@ -257,6 +257,42 @@ fire, and the car is destroyed (`GroundVehicleType::handleDestruction`) about
 a minute later. Whether the car scores a hit varies between runs, so the
 harness checks only the 'Mech firing and the kill.
 
+## Playing mission 1 through
+
+`mis0101` ends when its script (`MIS0101.ABL`) sees three objectives
+decided. Everything it needs is in the game's own data, and it all ran as is:
+the work was learning to aim.
+
+- **Targets are terrain-object part IDs.** `getTerrainObjectPartID(a, b)`
+  (`execHbTerrainObjectId`, `0x006331A0`) is `0x1000 + 8 * (a*400 + b)`: `a`
+  is a terrain block (the map is 6x6 blocks of 20x20 vertices, 128 world units
+  apart) and `b` a vertex in it. A target's world position is about
+  `(-7680 + (a%6*20 + b%20)*128 + 70, 7680 - (a/6*20 + b/20)*128 - 40)`.
+  The objectives are Camp Alpha's HQ (15,162) and gas tower (15,183), the
+  Garrison (22,80), (22,102), (21,98), and Camp Beta's HQ (9,337) plus
+  `ClanStar(0)`, which `[Commander1Group:0]` in `mis0101.fit` makes the Uller
+  alone.
+- **The minimap moves the camera.** Clicking it puts that point at the centre
+  of the screen (the minimap is drawn in the isometric orientation):
+
+      wx ~ 59.08*(mx + my) - 10041      wy ~ 59.08*(mx - my) + 1655
+
+  so a target is always at the same screen point once the camera is parked on
+  it, and a click there is an attack order (`SendTacOrder` code 16; a move is
+  code 2).
+- **A new order replaces the last**, so each target needs its own time: the
+  lance walks there and shoots it before the next click.
+- **Cheats** are the developers' own: a file named `ixtlriimceourl` in the
+  game folder sets `cheatsOn` (`0x0080879C`), and typed codes are checked
+  against a ring of `WM_CHAR`s. `mineeyeshaveseentheglory` reveals the map,
+  `osmiu` makes your units invulnerable, `deadeye` makes every shot hit. They
+  remove the luck from an unattended run; the game logic is unchanged.
+- The Garrison takes the longest; the Uller sentries at its post until the
+  HQ is damaged, so it is attacked first.
+
+`tools/conformance.py --playthrough` plays it, about 18 minutes, and ends on
+the "MISSION SUCCESSFUL" debriefing (Mission::run state 7 -> 6).
+
 ## Ruled out, do not retry
 
 1. `FitIniFile::textToLong` returning bad counts: all self-test cases pass.

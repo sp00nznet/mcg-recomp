@@ -63,6 +63,33 @@ MILESTONES = [
      r'(?s)\[mission\] state 3 -> 7(?:(?!\[mission\] state 7 -> ).)*\[watchdog\] \d+ s: stopping'),
     ('no fault', None),     # scored by absence, below
 ]
+# --playthrough: campaign mission 1 ("In The Beginning") from the launch to the
+# debriefing, about 17 minutes. The same start, then three cheat codes (reveal
+# the map, invulnerable, every shot hits; enabled by the developers' own switch
+# file, created for the run). Each objective is reached by clicking the
+# minimap to put the camera on it and then clicking the target, which with the
+# camera parked by the minimap is always at the same screen point. Targets are
+# the mission script's own (docs/bringup.md, "Playing mission 1 through").
+PLAY_CLICKS = ('477,165@8;477,165@18;477,165@28;37,376>248,61@45;'
+               '37,376>304,61@55;37,376>246,172@65;570,339@78;570,339@90;'
+               ':mineeyeshaveseentheglory@105;:osmiu@106;:deadeye@107;'
+               '560,380>720,560@112;'                       # select the lance
+               '86,89@116;625,507@119;648,557@200;'         # Camp Alpha: HQ, gas tower
+               '88,125@262;733,642@265;668,544@470;550,477@590;'   # the Garrison
+               '117,100@700;720,480@703;'                   # Camp Beta's guard
+               '115,91@880;652,544@883;'                    # Camp Beta HQ
+               '537,30@1000')                               # debrief: NEXT MISSION
+PLAY_SECONDS = 1060
+CHEAT_SWITCH = 'ixtlriimceourl'
+PLAY_MILESTONES = [
+    ('a mission launches', r'\[mission\] state 3 -> 7'),
+    ('objective 0: Camp Alpha HQ and gas tower', r'objective 0 -> 1 '),
+    ('objective 1: the three Garrison buildings', r'objective 1 -> 1 '),
+    ('objective 2: Camp Beta HQ and its guard', r'objective 2 -> 1 '),
+    ('the mission ends: the debriefing', r'\[mission\] state 7 -> 6'),
+    ('NEXT MISSION: back to the logistics shell', r'\[mission\] state 6 -> 3'),
+    ('no fault', None),
+]
 FAULT = re.compile(r'access violation|stack overflow|illegal instruction|'
                    r'integer divide by zero|in-page error')
 
@@ -73,13 +100,13 @@ def run(cmd, timeout):
     return p.returncode, p.stdout
 
 
-def milestones(exe):
-    _, log = run([exe, '--run', '--headless', '--watchdog', str(SECONDS), '--click', CLICKS],
-                 SECONDS + 60)
-    with open(os.path.join(ROOT, 'conformance.log'), 'w', encoding='utf-8') as fh:
+def milestones(exe, clicks=CLICKS, seconds=SECONDS, table=MILESTONES, logname='conformance.log'):
+    _, log = run([exe, '--run', '--headless', '--watchdog', str(seconds), '--click', clicks],
+                 seconds + 60)
+    with open(os.path.join(ROOT, logname), 'w', encoding='utf-8') as fh:
         fh.write(log)
     got = []
-    for name, rx in MILESTONES:
+    for name, rx in table:
         ok = not FAULT.search(log) if rx is None else bool(re.search(rx, log))
         got.append((name, ok))
     return got
@@ -107,6 +134,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--exe', default=os.path.join('build', 'mcg_recomp.exe'))
     ap.add_argument('--update', action='store_true')
+    ap.add_argument('--playthrough', action='store_true',
+                    help='also play mission 1 through to the debriefing (~18 min)')
     a = ap.parse_args()
     exe = os.path.join(ROOT, a.exe)
     if not os.path.exists(os.path.join(ROOT, 'game', 'MCX.EXE')) or not os.path.exists(exe):
@@ -120,8 +149,21 @@ def main():
     passed = sum(ok for _, ok in ms)
     result = {'milestones': passed, 'of': len(ms), 'selftest': st_ok,
               'selftest_of': st_n, **lh}
+    pt = []
+    if a.playthrough:
+        switch = os.path.join(ROOT, 'game', CHEAT_SWITCH)
+        made = not os.path.exists(switch)
+        if made:
+            open(switch, 'w').close()
+        try:
+            pt = milestones(exe, PLAY_CLICKS, PLAY_SECONDS, PLAY_MILESTONES, 'playthrough.log')
+        finally:
+            if made:
+                os.remove(switch)
+        result['playthrough'] = sum(ok for _, ok in pt)
+        result['playthrough_of'] = len(pt)
 
-    for name, ok in ms:
+    for name, ok in ms + [(f'mission 1: {n}', ok) for n, ok in pt]:
         print(f'  [{"PASS" if ok else "FAIL"}] {name}')
     print(f'milestones {passed}/{len(ms)}   selftest {st_ok}/{st_n}   '
           f'lifted {lh["lifted"]}   errors {lh["errors"]}   '
@@ -131,9 +173,12 @@ def main():
     if os.path.exists(BASELINE):
         with open(BASELINE, encoding='utf-8') as fh:
             base = json.load(fh)
-    worse = [k for k in ('milestones', 'selftest', 'lifted') if result[k] < base.get(k, 0)]
+    worse = [k for k in ('milestones', 'selftest', 'lifted', 'playthrough')
+             if k in result and result[k] < base.get(k, 0)]
     worse += [k for k in ('errors', 'unimplemented') if result[k] > base.get(k, result[k])]
     if a.update:
+        if 'playthrough' not in result and 'playthrough' in base:   # keep it
+            result['playthrough'], result['playthrough_of'] = base['playthrough'], base['playthrough_of']
         with open(BASELINE, 'w', encoding='utf-8') as fh:
             json.dump(result, fh, indent=1)
         print('baseline updated')

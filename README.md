@@ -10,7 +10,7 @@ Built on the [pcrecomp](https://github.com/sp00nznet/pcrecomp) toolchain and
 following its shared house style (layout, CLI, conformance harness, headless
 mode).
 
-## Status: **v0.1.0-dev, alpha. Boots, plays the menus, and plays the first campaign mission through its first fight: a 'Mech sent across the map walks there, meets an armored car, and destroys it. Recompiled throughout.**
+## Status: **v0.1.0-dev, alpha. Boots, plays the menus, and plays the first campaign mission start to finish: every objective destroyed, "MISSION SUCCESSFUL", the debriefing with its salvage. Recompiled throughout.**
 
 | Stage | State |
 |---|---|
@@ -21,11 +21,11 @@ mode).
 | Host (`build/mcg_recomp.exe`, x64) | maps the image at its own addresses; Win32 forwarded to the host, DirectDraw/DirectSound/DirectPlay mocked as COM objects in simulated memory |
 | Graphics | the engine's own software renderer, 8bpp shell and 16bpp mission, presented into a framed window |
 | Intro, main menu, campaign shell | **run**: New Campaign, briefing, deployment (drag 'Mechs into force groups), launch |
-| Mission | **runs**: terrain, water, forest, units, HUD, radar. **Selection, move orders and combat work**: units fire, take hits and are destroyed. Mission end not yet reached |
+| Mission | **runs**: terrain, water, forest, units, HUD, radar. **Plays through**: selection, move and attack orders, combat, objectives, and the end of the mission with its debriefing. The next mission not yet tried |
 | Sound | silent: DirectSound buffers are filled by the engine but not played |
 | Movies | not decoded: each Smacker movie ends immediately |
 | Headless mode | `--headless --record out.mp4`, with `--click` for scripted input. Never shows or activates a window |
-| Conformance harness | **15/15** milestones (boot to a mission, a move order and a kill, headless), **31/31** self-tests, 0 lift errors ([tools/conformance.py](tools/conformance.py)) |
+| Conformance harness | **15/15** milestones (boot to a mission, a move order and a kill, headless), **31/31** self-tests, 0 lift errors; with `--playthrough`, **7/7** more for mission 1 played to the debriefing and on to the next mission's shell (~18 min) ([tools/conformance.py](tools/conformance.py)) |
 
 ## Screenshots
 
@@ -35,6 +35,7 @@ Real output of `build\mcg_recomp.exe`, recompiled code throughout:
 |---|---|
 | ![the main menu](docs/images/main-menu.png) | ![briefing and deployment: a 'Mech in Force Group 1, the tactical map](docs/images/deployment.png) |
 | ![in mission: terrain, water, forest, the HUD and the deployed lance](docs/images/mission.png) | ![the first move order: a 'Mech walks to a clicked point](docs/images/first-move.gif) |
+| ![Mission 1 won: the debriefing, battle statistics, objectives, salvage and pilots](docs/images/mission-successful.png) | |
 
 ## What is not in this repo
 
@@ -157,7 +158,7 @@ first 'Mech is selected and walks to open ground.
 | `--record out.mp4` | pipe the presented frames to ffmpeg (1280x1024, 30 fps, wall-clock paced) |
 | `--frames N` | exit after N presented frames |
 | `--watchdog S` | every 3 s, say where the engine is; stop after S seconds |
-| `--click SPEC` | scripted mouse: `x,y@t` clicks and `x,y>x2,y2@t` drags in the 640x480 shell's coordinates, `t` in seconds from the campaign shell appearing |
+| `--click SPEC` | scripted mouse: `x,y@t` clicks and `x,y>x2,y2@t` drags in the 640x480 shell's coordinates (the mission's 1280x1024 once it runs), and `:text@t` to type, `t` in seconds from the campaign shell appearing |
 | `--selftest` | check the lifted CRT string routines, number parser, float printing and blitters against the host |
 
 Bring-up switches (environment): `MCG_WATCH=0xADDR` names the call that changes
