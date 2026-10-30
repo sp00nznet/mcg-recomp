@@ -94,6 +94,9 @@ FAULT = re.compile(r'access violation|stack overflow|illegal instruction|'
                    r'integer divide by zero|in-page error')
 
 
+os.environ["MCG_NOMOVIES"] = "1"   # the intro is ~5 minutes; the budget below is not
+
+
 def run(cmd, timeout):
     p = subprocess.run(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                        text=True, errors='replace', timeout=timeout)
