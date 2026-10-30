@@ -13,6 +13,7 @@ versions follow [SemVer](https://semver.org/).
   pushed to the host stream API in `audio.h`
   and mixed with the game sound. Frames are paced to the movie's own clock. Build smacker.c with
   `-DSMK_TEST` for a standalone check that dumps frames and a WAV.
+  `MCG_NOMOVIES=1` makes every movie one frame long; `conformance.py` sets it.
 - **Sound**: DirectSound buffers play. `audio.c` mixes them on waveOut at
   44.1 kHz with each buffer's rate, volume and pan, and moves the play cursor
   in real time so the engine's streaming works; `Lock` wraps around the ring

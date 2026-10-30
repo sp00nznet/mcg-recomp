@@ -530,7 +530,9 @@ void imp_SmackOpen(void) {
         MEM32(va + 0) = m->is_smk4 ? 0x344B4D53u : 0x324B4D53u;
         MEM32(va + S_WIDTH) = (uint32_t)m->w;
         MEM32(va + S_HEIGHT) = (uint32_t)smk_out_h(m);
-        MEM32(va + S_FRAMES) = (uint32_t)m->frames;
+        /* MCG_NOMOVIES=1: every movie is one frame long (unattended runs). */
+        { const char* e = getenv("MCG_NOMOVIES");
+          MEM32(va + S_FRAMES) = (e && *e && *e != '0') ? 1u : (uint32_t)m->frames; }
         MEM32(va + S_MSPERFRAME) = (uint32_t)(m->ms_x100 / 100);
         MEM32(va + S_TYPE) = (uint32_t)m->flags;
         /* Frame 0's palette is known before it is shown, as with the real
