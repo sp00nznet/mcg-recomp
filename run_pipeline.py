@@ -90,6 +90,8 @@ OVERRIDES = {
     0x006DD410: 'BriefingScreen::setUpDeploy -- report what the Ready Area got',
     0x006DD7C0: 'MechBriefBlock::init -- report where each Ready Area entry lands',
     0x006BB4D0: 'ObjectMap::addObject -- report the map cell index it derives',
+    0x007590D0: '_systemInit -- --res: replace the PREFS.CFG resolution it picks',
+    0x0064A190: 'FitIniFile::readIdLong -- --res: widen VisibleVerticesPerSide',
 }
 
 # Functions that print a line each of the first 20 times they run, so the

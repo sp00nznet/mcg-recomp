@@ -1283,7 +1283,20 @@ void imp_CreateWindowExA(void) {
      * fit; present() already StretchBlts when the client and the surface
      * differ, so the engine still renders at its own resolution.
      */
-    if ((style & WS_POPUP) && !(style & WS_CHILD)) {
+    if ((style & WS_POPUP) && !(style & WS_CHILD) && g_fullscreen) {
+        /* --fullscreen: borderless, covering the monitor, no mode switch --
+         * present() pillarboxes the picture inside it. Not topmost, so
+         * alt-tab and notifications behave. */
+        MONITORINFO mi = { sizeof mi };
+        POINT o = { 0, 0 };
+        GetMonitorInfoA(MonitorFromPoint(o, MONITOR_DEFAULTTOPRIMARY), &mi);
+        ex &= ~(DWORD)WS_EX_TOPMOST;
+        x = mi.rcMonitor.left;
+        y = mi.rcMonitor.top;
+        w = mi.rcMonitor.right - mi.rcMonitor.left;
+        h2 = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        fprintf(stderr, "[win] popup -> borderless fullscreen %dx%d\n", w, h2);
+    } else if ((style & WS_POPUP) && !(style & WS_CHILD)) {
         RECT wa = { 0, 0, 0, 0 };
         SystemParametersInfoA(SPI_GETWORKAREA, 0, &wa, 0);
         int maxw = (wa.right - wa.left) - 80, maxh = (wa.bottom - wa.top) - 120;
@@ -1587,8 +1600,13 @@ void imp_MapWindowPoints(void) { RET(0); STDRET(4); }   /* identity: see ClientT
 void imp_InvalidateRect(void) { RET(InvalidateRect(HWND_OF(ARG(0)), (const RECT*)simp(ARG(1)), (BOOL)ARG(2)) ? 1 : 0); STDRET(3); }
 
 void imp_SetWindowPos(void) {
-    RET(SetWindowPos(HWND_OF(ARG(0)), HWND_OF(ARG(1)), (int)ARG(2), (int)ARG(3),
-                     (int)ARG(4), (int)ARG(5), ARG(6)) ? 1 : 0);
+    HWND h = HWND_OF(ARG(0));
+    UINT fl = ARG(6);
+    /* --fullscreen: the game sizes its window to the display mode, which
+     * would undo the monitor-covering one. Keep ours; present() scales. */
+    if (g_fullscreen && h == g_game_hwnd) fl |= SWP_NOMOVE | SWP_NOSIZE;
+    RET(SetWindowPos(h, HWND_OF(ARG(1)), (int)ARG(2), (int)ARG(3),
+                     (int)ARG(4), (int)ARG(5), fl) ? 1 : 0);
     STDRET(7);
 }
 
