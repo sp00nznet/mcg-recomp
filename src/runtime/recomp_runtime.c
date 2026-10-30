@@ -1052,6 +1052,91 @@ static uint32_t call_lifted(uint32_t va, int argc, const uint32_t* args) {
     return g_eax;
 }
 
+/*
+ * MCG_SPRITEDUMP=dir -- ground truth for tools/sprites.py (docs/sprites.md).
+ *
+ * SpriteManager::getMechShapeData reads one packet of a 'Mech's nested PAK
+ * and hands it straight to Shape::init. Hooked at both entries: the first
+ * remembers which file/'Mech/packet is being read, the second writes the packet bytes and, for every
+ * frame in it, what the engine's own AG_shape_draw makes of it -- drawn twice,
+ * over 0x00 and over 0xFF, so a pixel that differs between the two is one the
+ * shape left transparent. Off unless the variable is set.
+ */
+static uint32_t g_sd_mech, g_sd_packet, g_sd_part, g_sd_90, g_sd_armed;
+
+static const char* spritedump_dir(void) {
+    static int init; static const char* dir;
+    if (!init) { init = 1; dir = getenv("MCG_SPRITEDUMP"); }
+    return dir;
+}
+
+void recomp_hook_getMechShapeData(void) {
+    if (!spritedump_dir()) return;
+    g_sd_mech = MEM32(g_esp + 4);
+    g_sd_packet = MEM32(g_esp + 8);
+    g_sd_part = MEM32(g_esp + 12);
+    g_sd_90 = MEM32(0x007D8708u) && MEM32(g_esp + 24);   /* use90PixelSprite */
+    g_sd_armed = 1;
+}
+
+void recomp_hook_Shape_init(void) {
+    static int dumped;
+    static uint32_t buf, win, pane;
+    const char* dir = spritedump_dir();
+    /* Armed by getMechShapeData, which ends in this call on every path that
+     * reads a packet. (The return address cannot say so: the default build
+     * pushes a dummy one, RECOMP_RETADDR=0.) The selftest re-reads each
+     * packet from the PAKs, so a mis-attributed one would show up there. */
+    if (!dir || !g_sd_armed || dumped >= 2000) return;
+    g_sd_armed = 0;
+    uint32_t data = MEM32(g_esp + 4), size = MEM32(g_esp + 12);
+    uint32_t tbl = MEM32(data) == MEM32(0x00792B50u) ? data : data + 6;  /* "1.10" */
+    char path[512], p2[540];
+    snprintf(path, sizeof path, "%s/part%u%s_m%u_p%u", dir, g_sd_part,
+             g_sd_90 ? "_90" : "", g_sd_mech, g_sd_packet);
+    snprintf(p2, sizeof p2, "%s.pkt", path);
+    FILE* f = fopen(p2, "wb");
+    if (!f) return;
+    fwrite((void*)ADDR(data), 1, size, f);
+    fclose(f);
+    dumped++;
+    /* gamePalette->colors: 256 x 6-bit RGB, as writeTGA8Bit reads it. */
+    uint32_t pal = MEM32(0x007F09A8u);
+    snprintf(p2, sizeof p2, "%s/palette.bin", dir);
+    if (pal && MEM32(pal + 4) && (f = fopen(p2, "wb")) != NULL) {
+        fwrite((void*)ADDR(MEM32(pal + 4)), 1, 768, f);
+        fclose(f);
+    }
+
+    uint32_t save[8] = {g_eax, g_ecx, g_edx, g_ebx, g_esp, g_esi, g_edi, g_ebp};
+    if (!buf) {
+        buf = shims_alloc(0x1FA40); win = shims_alloc(12); pane = shims_alloc(20);
+    }
+    snprintf(p2, sizeof p2, "%s.eng", path);
+    f = fopen(p2, "wb");
+    uint32_t n = MEM32(tbl + 4);
+    for (uint32_t i = 0; f && i < n && i < 256; i++) {
+        uint32_t sh = tbl + MEM32(tbl + 8 + 8 * i);
+        int32_t x0 = (int32_t)MEM32(sh + 8), y0 = (int32_t)MEM32(sh + 12);
+        int32_t w = (int32_t)MEM32(sh + 16) - x0 + 1, h = (int32_t)MEM32(sh + 20) - y0 + 1;
+        int32_t hdr[5] = {(int32_t)i, x0, y0, w, h};
+        if (w <= 0 || h <= 0 || w * h > 0x1FA40) { hdr[3] = hdr[4] = 0; fwrite(hdr, 4, 5, f); continue; }
+        fwrite(hdr, 4, 5, f);
+        for (int bg = 0; bg < 2; bg++) {
+            uint32_t a[5] = {pane, tbl, i, (uint32_t)-x0, (uint32_t)-y0};
+            memset((void*)ADDR(buf), bg ? 0xFF : 0x00, (size_t)(w * h));
+            MEM32(win) = buf; MEM32(win + 4) = (uint32_t)(w - 1); MEM32(win + 8) = (uint32_t)(h - 1);
+            MEM32(pane) = win; MEM32(pane + 4) = 0; MEM32(pane + 8) = 0;
+            MEM32(pane + 12) = (uint32_t)(w - 1); MEM32(pane + 16) = (uint32_t)(h - 1);
+            call_lifted(0x006B7F00u, 5, a);                    /* AG_shape_draw */
+            fwrite((void*)ADDR(buf), 1, (size_t)(w * h), f);
+        }
+    }
+    if (f) fclose(f);
+    g_eax = save[0]; g_ecx = save[1]; g_edx = save[2]; g_ebx = save[3];
+    g_esp = save[4]; g_esi = save[5]; g_edi = save[6]; g_ebp = save[7];
+}
+
 static int g_st_fail;
 
 static void expect(const char* what, uint32_t got, uint32_t want) {
