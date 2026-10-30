@@ -23,7 +23,7 @@ mode).
 | Intro, main menu, campaign shell | **run**: New Campaign, briefing, deployment (drag 'Mechs into force groups), launch |
 | Mission | **runs**: terrain, water, forest, units, HUD, radar. **Plays through**: selection, move and attack orders, combat, objectives, and the end of the mission with its debriefing. The next mission not yet tried |
 | Sound | silent: DirectSound buffers are filled by the engine but not played |
-| Movies | not decoded: each Smacker movie ends immediately |
+| Movies | play: own Smacker decoder (video + DPCM audio, paced to the movie clock); audio waits on host output |
 | Headless mode | `--headless --record out.mp4`, with `--click` for scripted input. Never shows or activates a window |
 | Conformance harness | **15/15** milestones (boot to a mission, a move order and a kill, headless), **31/31** self-tests, 0 lift errors; with `--playthrough`, **7/7** more for mission 1 played to the debriefing and on to the next mission's shell (~18 min) ([tools/conformance.py](tools/conformance.py)) |
 

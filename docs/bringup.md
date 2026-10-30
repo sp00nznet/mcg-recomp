@@ -306,7 +306,7 @@ the "MISSION SUCCESSFUL" debriefing (Mission::run state 7 -> 6).
 
 ## Open
 
-- The intro Smacker movies are not decoded (`SmackOpen` returns a one-frame
-  movie that has already finished).
+- Smacker movies decode (smacker.c), but only the 8-bit buffer path: the
+  engine's DirectDraw surface path (`SmackDDSurfaceType`) answers -1.
 - The `__sbh_alloc_block` fault above.
 - Sound is silent.

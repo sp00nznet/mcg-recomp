@@ -1854,41 +1854,6 @@ void imp_SelectPalette(void)  { RET(h_put(SelectPalette(HDC_OF(ARG(0)), (HPALETT
 void imp_RealizePalette(void) { RET(RealizePalette(HDC_OF(ARG(0)))); STDRET(1); }
 void imp_AnimatePalette(void) { RET(AnimatePalette((HPALETTE)h_ptr(ARG(0)), ARG(1), ARG(2), (const PALETTEENTRY*)simp(ARG(3))) ? 1 : 0); STDRET(4); }
 void imp_GetSystemPaletteEntries(void) { RET(GetSystemPaletteEntries(HDC_OF(ARG(0)), ARG(1), ARG(2), (LPPALETTEENTRY)simp(ARG(3)))); STDRET(4); }
-
-/*
- * SmackOpen -- a movie that is already over.
- *
- * A Smack begins with Version, Width, Height, Frames and MSPerFrame, and the
- * engine reads the width and height straight back out with no null check at
- * all: BriefingScreen::setUpOperation calls this and then does
- * `mov eax, [edi + 8]` on the result. So the generated stub's NULL is not a
- * safe answer -- it faults the instant a briefing starts.
- *
- * Hand back a real, zeroed structure describing a one-frame movie that is
- * already on its last frame. Every "is it finished yet" the engine asks then
- * answers yes, the briefing window gets a sane size, and no pixel is ever
- * decoded. One buffer serves every open, because nothing reads it back.
- *
- * ponytail: no decoder. The .smk files are on the disc and decoding them is a
- * project of its own; this is only what gets the game past the movies.
- */
-void imp_SmackOpen(void) {
-    static uint32_t smk;
-    if (!smk) {
-        smk = shims_alloc(1024);            /* far more than the fields used */
-        memset((void*)ADDR(smk), 0, 1024);
-        MEM32(smk +  0) = 0x324B4D53u;      /* "SMK2" */
-        MEM32(smk +  4) = 320;              /* Width      */
-        MEM32(smk +  8) = 200;              /* Height     */
-        MEM32(smk + 12) = 1;                /* Frames     */
-        MEM32(smk + 16) = 33;               /* MSPerFrame */
-    }
-    { static int said; if (!said) { said = 1;
-        fprintf(stderr, "[smack] SmackOpen -> an empty 320x200 movie\n"); } }
-    RET(smk);
-    STDRET(3);
-}
-
 /* ============================================================
  * The registry, forwarded to the host's. MechCommander keeps its settings in
  * HKCU like any other Win32 app, so there is nothing to emulate -- only the

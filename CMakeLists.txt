@@ -34,6 +34,8 @@ add_executable(mcg_recomp
   src/runtime/recomp_runtime.c
   src/runtime/shims_impl.c
   src/runtime/ddraw.c
+  src/runtime/smacker.c
+  src/runtime/audio_stub.c        # TEMPORARY: until the host audio lands
   "${PCRECOMP}/runtime/recomp32/image_loader.c"
   "${PCRECOMP}/runtime/recomp32/crash_report.c"
 )

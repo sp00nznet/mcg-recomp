@@ -133,10 +133,10 @@ HAND_WRITTEN = {
     'GetStockObject', 'SetStretchBltMode', 'BitBlt', 'CreateDIBSection',
     'SetDIBColorTable', 'CreatePalette', 'SelectPalette', 'RealizePalette',
     'AnimatePalette', 'GetSystemPaletteEntries',
-    # Smacker. A stub returning NULL is not safe here: BriefingScreen::
-    # setUpOperation reads the returned Smack's width and height with no null
-    # check at all, so a stub faults the moment a briefing starts.
-    'SmackOpen',
+    # Smacker: a real decoder and player in smacker.c.
+    'SmackOpen', 'SmackClose', 'SmackDoFrame', 'SmackNextFrame', 'SmackWait',
+    'SmackToBuffer', 'SmackToBufferRect', 'SmackColorRemap',
+    'SmackDDSurfaceType', 'SmackSoundUseDirectSound',
 }
 
 
@@ -258,7 +258,7 @@ def emit(rows, out_path):
         seen.add(real)
         if real in HAND_WRITTEN:
             lines.append(f'extern void imp_{real}(void);  /* {dll}!{real} '
-                         f'({argc} args, {src}) - real body in shims_impl.c */')
+                         f'({argc} args, {src}) - real body in a runtime .c */')
             continue
         lines.append(f'/* {dll}!{real}  ({argc} args, via {src}) */')
         lines.append(f'static void imp_{real}(void) {{ IMPORT_STUB("{real}"); '
@@ -328,8 +328,12 @@ def check_hand_written(rows, shims_path):
     if not os.path.exists(shims_path):
         return
     derived = {real: argc for _v, _d, _n, real, argc, _s in rows}
-    with open(shims_path, encoding='utf-8') as fh:
-        src = fh.read()
+    src = ''
+    for extra in ('shims_impl.c', 'smacker.c'):   # every file with imp_ bodies
+        path = os.path.join(os.path.dirname(shims_path), extra)
+        if os.path.exists(path):
+            with open(path, encoding='utf-8') as fh:
+                src += fh.read() + '\n'
     # Bound each body by the start of the next definition, so one-line shims on
     # consecutive lines don't run together.
     starts = [(m.start(), m.group(1))

@@ -5,6 +5,15 @@ versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Smacker movies play** (`src/runtime/smacker.c`): a decoder written from the
+  format description (palette, 4x4 MONO/FULL/SKIP/FILL video, DPCM audio) and
+  real bodies for all ten smackw32 imports. The FASA logo, the opening
+  cinematic, briefing and pilot videos decode; audio is decoded to s16 and
+  pushed to the host stream API in `audio.h` (no-op `audio_stub.c` until host
+  audio lands). Frames are paced to the movie's own clock. Build smacker.c with
+  `-DSMK_TEST` for a standalone check that dumps frames and a WAV.
+
 ## [0.1.0] - 2026-10-30
 
 First release: boots, plays the menus, and plays the first campaign mission
