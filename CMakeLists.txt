@@ -36,6 +36,7 @@ add_executable(mcg_recomp
   src/runtime/ddraw.c
   src/runtime/smacker.c
   src/runtime/audio.c
+  src/runtime/settings.c
   "${PCRECOMP}/runtime/recomp32/image_loader.c"
   "${PCRECOMP}/runtime/recomp32/crash_report.c"
 )

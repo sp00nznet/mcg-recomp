@@ -15,7 +15,8 @@
  * the mix against the clock and throws it away: cursors move as they would
  * on a real card, so the engine's timing is the same either way.
  *
- * MCG_VOLUME=0..100 sets the master volume (default 100).
+ * mcg.ini [sound] master_volume=0..100 and mute=1; MCG_VOLUME and MCG_MUTE
+ * override them.
  * MCG_WAVDUMP=file.wav writes everything mixed to a WAV, device or not: the
  * way to hear a headless run.
  */
@@ -27,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "audio.h"
+#include "settings.h"
 
 #define RATE    44100
 #define BLOCK   1024              /* frames per waveOut buffer, ~23 ms */
@@ -163,7 +165,8 @@ static DWORD WINAPI mixer_thread(LPVOID unused) {
     HWAVEOUT wo = NULL;
     HANDLE ev = CreateEventA(NULL, FALSE, FALSE, NULL);
     const char* mute = getenv("MCG_MUTE");
-    if (!g_headless && !(mute && *mute == '1')) {
+    int muted = mute && *mute ? *mute == '1' : mcg_setting_int("sound", "mute", 0) != 0;
+    if (!g_headless && !muted) {
         WAVEFORMATEX wf = { WAVE_FORMAT_PCM, 2, RATE, RATE * 4, 4, 16, 0 };
         if (waveOutOpen(&wo, WAVE_MAPPER, &wf, (DWORD_PTR)ev, 0, CALLBACK_EVENT) != MMSYSERR_NOERROR) wo = NULL;
     }
@@ -210,7 +213,7 @@ void mcg_audio_init(void) {
     if (InterlockedCompareExchange(&g_started, 1, 0) != 0) return;
     InitializeCriticalSection(&g_cs);
     const char* vol = getenv("MCG_VOLUME");
-    if (vol && *vol) g_master = (float)atoi(vol) / 100.0f;
+    g_master = (float)(vol && *vol ? atoi(vol) : mcg_setting_int("sound", "master_volume", 100)) / 100.0f;
     const char* dump = getenv("MCG_WAVDUMP");
     if (dump && *dump && (g_dump = fopen(dump, "wb")) != NULL) dump_header();
     CloseHandle(CreateThread(NULL, 0, mixer_thread, NULL, 0, NULL));
