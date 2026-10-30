@@ -12,8 +12,8 @@ options screen reads and writes as it always did. `mcg.ini` holds only what the
 ```ini
 [display]
 fullscreen=0      ; 1 = borderless fullscreen      (flag: --fullscreen / --window)
-scale=            ; window scale                    (flag: --scale)
-res=              ; WxH                             (flag: --res WxH)
+scale=sharp       ; sharp, smooth or integer        (flag: --scale)
+res=              ; WxH up to 3840x2160             (flag: --res WxH)
 
 [sound]
 master_volume=100 ; 0-100, on top of the game's own sliders

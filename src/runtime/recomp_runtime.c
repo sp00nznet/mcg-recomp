@@ -957,8 +957,59 @@ static void mcg_Camera_changeTarget(void) {
     recomp_Camera__changeTarget_006AFB30();
 }
 
+/*
+ * --res WxH. _systemInit reads PREFS.CFG's Resolution (1, 2, 3) and turns it
+ * into displayWidth/displayHeight (800x600, 1024x768, 1280x1024); aSystem::start
+ * reads those two globals straight back to size the window, the display mode
+ * and the tactical viewport. So replacing them after the call is the whole
+ * change -- no engine code is patched. displayMode (the 1/2/3 index, read once
+ * by aSystem for its art set) is left as PREFS.CFG set it. See docs/hires.md.
+ */
+void recomp_systemInit_007590D0(void);
+static void mcg_systemInit(void) {
+    recomp_systemInit_007590D0();
+    if (g_res_w && g_res_h) {
+        fprintf(stderr, "[res] %dx%d replaces PREFS.CFG's %ux%u\n", g_res_w, g_res_h,
+                MEM32(0x007A9E70u), MEM32(0x007AA920u));
+        MEM32(0x007A9E70u) = (uint32_t)g_res_w;     /* displayWidth  */
+        MEM32(0x007AA920u) = (uint32_t)g_res_h;     /* displayHeight */
+    }
+}
+
+/*
+ * --res, part two: how much terrain is drawn.
+ *
+ * Each mission's terrain FIT carries VisibleVerticesPerSide, the side of the
+ * square of map vertices around the camera that Terrain::init caches and the
+ * renderer draws. The shipped value is sized for 1280x1024; a wider screen
+ * looks past it at uncached vertices, which draw as noise. It is read through
+ * FitIniFile::readIdLong straight into Terrain::visibleVerticesPerSide
+ * (0x00809F20), before anything is sized from it -- so scaling the value as it
+ * is read is the engine's own config with a bigger number in it.
+ * ponytail: matched by destination address, the one caller that matters.
+ */
+void recomp_FitIniFile__readIdLong_0064A190(void);
+static void mcg_readIdLong(void) {
+    uint32_t out = MEM32(g_esp + 8);
+    recomp_FitIniFile__readIdLong_0064A190();
+    if (out == 0x00809F20u && g_res_w && g_res_h &&
+        (g_res_w > 1280 || g_res_h > 1024)) {
+        int32_t v = (int32_t)MEM32(out);
+        /* The view is an isometric diamond over a square: what has to be
+         * covered grows with the larger of the two axes. */
+        double k = (double)g_res_w / 1280.0;
+        if ((double)g_res_h / 1024.0 > k) k = (double)g_res_h / 1024.0;
+        int32_t nv = (int32_t)(v * k + 0.999);
+        nv = (nv + 1) & ~1;                       /* keep it even */
+        MEM32(out) = (uint32_t)nv;
+        fprintf(stderr, "[res] VisibleVerticesPerSide %d -> %d\n", v, nv);
+    }
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     switch (va) {
+    case 0x0064A190u: return mcg_readIdLong;
+    case 0x007590D0u: return mcg_systemInit;
     case 0x006AEB80u: return mcg_Camera_update;
     case 0x006AFB30u: return mcg_Camera_changeTarget;
     case 0x006BB4D0u: return mcg_ObjectMap_addObject;
@@ -1557,11 +1608,27 @@ static const char USAGE[] =
     "  --frames N       exit after N presented frames\n"
     "  --watchdog S     report where the engine is every 3 s; stop after S s\n"
     "  --click SPEC     scripted mouse, as MCG_CLICK: \"x,y@t;x,y>x2,y2@t\"\n"
-    "  --selftest       check the lifted CRT and blitters against the host\n";
+    "  --selftest       check the lifted CRT and blitters against the host\n"
+    "  --fullscreen     borderless window over the whole monitor (--window: framed)\n"
+    "  --scale M        sharp (nearest, default) | smooth | integer\n"
+    "  --res WxH        the resolution the game runs at, 640x480..3840x2160\n"
+    "                   (default: PREFS.CFG's, 1280x1024); wider shows more map\n"
+    "  --fps            frame-rate readout in the corner and on stderr\n";
 
 int main(int argc, char** argv) {
     const char* game = "game";
     int run = 0, selftest = 0;
+    /* mcg.ini beside the exe sets the defaults; the flags below win. */
+    settings_init();
+    g_fullscreen = mcg_setting_int("display", "fullscreen", 0);
+    {
+        const char* sc = mcg_setting("display", "scale", "sharp");
+        g_scale_mode = !strcmp(sc, "smooth") ? 1 : !strcmp(sc, "integer") ? 2 : 0;
+        const char* r = mcg_setting("display", "res", "");
+        if (sscanf(r, "%dx%d", &g_res_w, &g_res_h) != 2 || g_res_w < 640 || g_res_h < 480 ||
+            g_res_w > 3840 || g_res_h > 2160)
+            g_res_w = g_res_h = 0;
+    }
     for (int i = 1; i < argc; i++) {
         const char* a = argv[i];
         const char* v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -1573,9 +1640,18 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--frames") && v) { g_max_frames = strtol(v, NULL, 0); i++; }
         else if (!strcmp(a, "--watchdog") && v) { g_watchdog_secs = strtol(v, NULL, 0); i++; }
         else if (!strcmp(a, "--click") && v) { _putenv_s("MCG_CLICK", v); i++; }
+        else if (!strcmp(a, "--fullscreen")) g_fullscreen = 1;
+        else if (!strcmp(a, "--window")) g_fullscreen = 0;
+        else if (!strcmp(a, "--fps")) g_show_fps = 1;
+        else if (!strcmp(a, "--scale") && v) {
+            g_scale_mode = !strcmp(v, "smooth") ? 1 : !strcmp(v, "integer") ? 2 : 0;
+            i++;
+        }
+        else if (!strcmp(a, "--res") && v &&
+                 sscanf(v, "%dx%d", &g_res_w, &g_res_h) == 2 &&
+                 g_res_w >= 640 && g_res_h >= 480 && g_res_w <= 3840 && g_res_h <= 2160) i++;
         else { fputs(USAGE, stderr); return 2; }
     }
-    settings_init();        /* mcg.ini beside the exe; flags above win */
     /* Resolved before the chdir below, so it lands where the caller meant. */
     static char rec[MAX_PATH];
     if (g_record_path && GetFullPathNameA(g_record_path, MAX_PATH, rec, NULL))

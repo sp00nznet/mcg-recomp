@@ -19,7 +19,7 @@ mode).
 | Lift (`run_pipeline.py`) | **whole program**: 6,065 functions (the debug info's 5,760 plus what four discovery passes find), 0 lift errors, 1.56M lines of C |
 | Imports (`gen_imports.py`) | all 204 bridged, argument counts derived from three sources and cross-checked; 307 `imagehlp` exports resolved at run time |
 | Host (`build/mcg_recomp.exe`, x64) | maps the image at its own addresses; Win32 forwarded to the host, DirectDraw/DirectSound/DirectPlay mocked as COM objects in simulated memory |
-| Graphics | the engine's own software renderer, 8bpp shell and 16bpp mission, presented into a framed window |
+| Graphics | the engine's own software renderer, 8bpp shell and 16bpp mission, presented into a framed or borderless-fullscreen window, aspect kept, paced to the display from its own thread; `--res` up to 3840x2160 for a wider battlefield |
 | Intro, main menu, campaign shell | **run**: New Campaign, briefing, deployment (drag 'Mechs into force groups), launch |
 | Mission | **runs**: terrain, water, forest, units, HUD, radar. **Plays through**: selection, move and attack orders, combat, objectives, and the end of the mission with its debriefing. The next mission not yet tried |
 | Sound | **plays**: the engine's DirectSound buffers are mixed on the host (waveOut), with volume, pan and real-time cursors. `MCG_VOLUME=0..100`, `MCG_MUTE=1`; headless runs stay silent, `MCG_WAVDUMP=file.wav` records the mix |
@@ -166,7 +166,11 @@ first 'Mech is selected and walks to open ground.
 | `--run` | enter the game (without it: map, bind and stop) |
 | `--game DIR` | the game folder, holding `MCX.EXE` (default `game`) |
 | `--headless` | a cloaked window that never reaches a screen or takes focus; the real keyboard and mouse are ignored |
-| `--record out.mp4` | pipe the presented frames to ffmpeg (1280x1024, 30 fps, wall-clock paced) |
+| `--record out.mp4` | pipe what the window shows to ffmpeg (the window's client size, 30 fps, wall-clock paced) |
+| `--fullscreen` | borderless window over the whole monitor, no mode switch; `--window` (default) is a framed window |
+| `--scale sharp\|smooth\|integer` | how the picture fills the window, aspect always kept (pillar/letterbox bars): nearest-neighbour (default), filtered, or whole multiples only |
+| `--res WxH` | the resolution the game runs at, up to 3840x2160 (default: `PREFS.CFG`'s, 1280x1024). A wider one shows more of the battlefield; see [docs/hires.md](docs/hires.md) |
+| `--fps` | engine and display frame rates in the corner, and on stderr once a second |
 | `--frames N` | exit after N presented frames |
 | `--watchdog S` | every 3 s, say where the engine is; stop after S seconds |
 | `--click SPEC` | scripted mouse: `x,y@t` clicks and `x,y>x2,y2@t` drags in the 640x480 shell's coordinates (the mission's 1280x1024 once it runs), and `:text@t` to type, `t` in seconds from the campaign shell appearing |

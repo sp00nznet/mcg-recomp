@@ -57,6 +57,10 @@ uint32_t mcg_dyn_resolve(const char* module, const char* proc);
 extern int g_headless;               /* --headless: never shown, never focused */
 extern const char* g_record_path;    /* --record out.mp4 */
 extern long g_max_frames;            /* --frames N: exit after N presents */
+extern int g_fullscreen;             /* --fullscreen (display.c) */
+extern int g_scale_mode;             /* --scale: 0 sharp, 1 smooth, 2 integer */
+extern int g_res_w, g_res_h;         /* --res WxH, 0 = the game's own */
+extern int g_show_fps;               /* --fps */
 void mcg_quit(int code);             /* close the recording, then exit */
 
 /* Generated bridge tables (imports_gen.c). */

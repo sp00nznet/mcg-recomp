@@ -101,11 +101,14 @@ static uint32_t g_mode_w = 640, g_mode_h = 480, g_mode_bpp = 8;
  * or clicks land somewhere other than where they look. */
 static uint32_t g_shown_w = 640, g_shown_h = 480;
 
-/* One 32-bit DIB, reused: the palette lookup target the host can blit. */
+/* The 32-bit picture the palette lookup writes, owned by display.c (which
+ * triple-buffers it for the present thread), and a DC with it selected. */
 static HDC g_memdc;
-static HBITMAP g_dib;
 static uint32_t* g_dib_px;
-static uint32_t g_dib_w, g_dib_h;
+uint32_t* display_work(uint32_t w, uint32_t h, HDC* dc);
+void display_submit(HWND h, uint32_t sw, uint32_t sh);
+void display_draw(HDC dst, int cw, int ch, HDC src, int sw, int sh);
+int display_unmap(HWND h, int sw, int sh, POINT* p);
 
 static surface_t* surf_of(uint32_t obj) {
     if (!obj || MEM32(obj + OBJ_KIND) != KIND_SURFACE) return NULL;
@@ -154,8 +157,9 @@ static surface_t* current_backbuffer(void) {
  * fast or slow the engine presents. ponytail: frames are duplicated, not
  * blended; good enough to show what happened.
  */
-#define REC_W 1280
-#define REC_H 1024
+/* The recording is the window: same size (rounded to even, as yuv420p needs),
+ * same bars and scaling, fixed at the first frame. */
+static int REC_W = 1280, REC_H = 1024;
 #define REC_FPS 30
 static FILE* g_rec;
 static HDC g_rec_dc;
@@ -179,6 +183,11 @@ static void record_frame(uint32_t sw, uint32_t sh) {
     if (g_presents == 1 || g_presents % 100 == 0)
         fprintf(stderr, "[capture] frame %u presented\n", g_presents);
     if (g_record_path && !g_rec && !g_rec_written) {
+        RECT rc;
+        if (g_hwnd && GetClientRect(g_hwnd, &rc) && rc.right >= 64 && rc.bottom >= 64) {
+            REC_W = rc.right & ~1;
+            REC_H = rc.bottom & ~1;
+        }
         char cmd[MAX_PATH + 200];
         snprintf(cmd, sizeof cmd, "ffmpeg -loglevel error -y -f rawvideo "
                  "-pix_fmt bgra -s %dx%d -r %d -i - -pix_fmt yuv420p \"%s\"",
@@ -194,7 +203,6 @@ static void record_frame(uint32_t sw, uint32_t sh) {
         g_rec_dc = CreateCompatibleDC(NULL);
         g_rec_bmp = CreateDIBSection(g_rec_dc, &bi, DIB_RGB_COLORS, &g_rec_px, NULL, 0);
         SelectObject(g_rec_dc, g_rec_bmp);
-        SetStretchBltMode(g_rec_dc, HALFTONE);
         g_rec_t0 = GetTickCount();
         if (!g_rec || !g_rec_px) {
             fprintf(stderr, "[capture] cannot record: is ffmpeg on PATH?\n");
@@ -204,9 +212,7 @@ static void record_frame(uint32_t sw, uint32_t sh) {
         }
     }
     if (g_rec) {
-        HGDIOBJ old = SelectObject(g_memdc, g_dib);
-        StretchBlt(g_rec_dc, 0, 0, REC_W, REC_H, g_memdc, 0, 0, (int)sw, (int)sh, SRCCOPY);
-        SelectObject(g_memdc, old);
+        display_draw(g_rec_dc, REC_W, REC_H, g_memdc, (int)sw, (int)sh);
         GdiFlush();
         uint64_t due = (uint64_t)(GetTickCount() - g_rec_t0) * REC_FPS / 1000 + 1;
         for (; g_rec_written < due; g_rec_written++)
@@ -227,28 +233,16 @@ void mcg_quit(int code) {
 static void present(surface_t* s) {
     if (!s || !s->bits || !g_hwnd) return;
 
-    if (!g_dib || g_dib_w != s->width || g_dib_h != s->height) {
-        if (g_dib) { DeleteObject(g_dib); g_dib = NULL; }
-        if (!g_memdc) {
-            HDC wdc = GetDC(g_hwnd);
-            g_memdc = CreateCompatibleDC(wdc);
-            ReleaseDC(g_hwnd, wdc);
+    {
+        static uint32_t lw, lh;
+        g_dib_px = display_work(s->width, s->height, &g_memdc);
+        if (!g_dib_px) return;
+        if (lw != s->width || lh != s->height) {
+            lw = s->width;
+            lh = s->height;
+            fprintf(stderr, "[ddraw] present target %ux%u from bits %08X\n",
+                    lw, lh, s->bits);
         }
-        BITMAPINFO bi;
-        memset(&bi, 0, sizeof bi);
-        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-        bi.bmiHeader.biWidth = (LONG)s->width;
-        bi.bmiHeader.biHeight = -(LONG)s->height;   /* top-down */
-        bi.bmiHeader.biPlanes = 1;
-        bi.bmiHeader.biBitCount = 32;
-        bi.bmiHeader.biCompression = BI_RGB;
-        g_dib = CreateDIBSection(g_memdc, &bi, DIB_RGB_COLORS,
-                                 (void**)&g_dib_px, NULL, 0);
-        if (!g_dib) return;
-        g_dib_w = s->width;
-        g_dib_h = s->height;
-        fprintf(stderr, "[ddraw] present target %ux%u from bits %08X\n",
-                g_dib_w, g_dib_h, s->bits);
     }
 
     const uint8_t* src = (const uint8_t*)ADDR(s->bits);
@@ -475,19 +469,7 @@ static void present(surface_t* s) {
 
     record_frame(sw, sh);
 
-    HDC wdc = GetDC(g_hwnd);
-    HGDIOBJ old = SelectObject(g_memdc, g_dib);
-    RECT rc;
-    GetClientRect(g_hwnd, &rc);
-    if ((uint32_t)rc.right == sw && (uint32_t)rc.bottom == sh) {
-        BitBlt(wdc, 0, 0, (int)sw, (int)sh, g_memdc, 0, 0, SRCCOPY);
-    } else {
-        SetStretchBltMode(wdc, COLORONCOLOR);
-        StretchBlt(wdc, 0, 0, rc.right, rc.bottom, g_memdc, 0, 0,
-                   (int)sw, (int)sh, SRCCOPY);
-    }
-    SelectObject(g_memdc, old);
-    ReleaseDC(g_hwnd, wdc);
+    display_submit(g_hwnd, sw, sh);
 }
 
 /* ---- helpers ------------------------------------------------------------ */
@@ -870,17 +852,13 @@ static void dd_CreateClipper(void) { if (ARG(2)) MEM32(ARG(2)) = 0; RET(DDERR_UN
  * that saves the pixels under the cursor walks straight out of the arena.
  */
 void ddraw_map_cursor(POINT* p) {
-    RECT rc;
     if (!g_hwnd || !g_mode_w || !g_mode_h) return;
     ScreenToClient(g_hwnd, p);
-    GetClientRect(g_hwnd, &rc);
     /* Map through the SAME rectangle present() is showing, not the whole mode:
      * while the shell is scaled up, a pointer halfway across the window is
-     * halfway across the 640x480 layout, not halfway across 1280x1024. */
-    if (rc.right > 0 && rc.bottom > 0) {
-        p->x = p->x * (LONG)g_shown_w / rc.right;
-        p->y = p->y * (LONG)g_shown_h / rc.bottom;
-    }
+     * halfway across the 640x480 layout, not halfway across 1280x1024. And
+     * through the same bars: a point on a pillarbox bar is outside. */
+    int inside = display_unmap(g_hwnd, (int)g_shown_w, (int)g_shown_h, p);
     /*
      * A pointer outside the window holds its last position inside it.
      *
@@ -896,8 +874,7 @@ void ddraw_map_cursor(POINT* p) {
      * game sees the pointer while it is over the window and nothing after.
      */
     static LONG held_x, held_y;
-    if (p->x < 0 || p->y < 0 ||
-        p->x >= (LONG)g_shown_w || p->y >= (LONG)g_shown_h) {
+    if (!inside) {
         p->x = held_x;
         p->y = held_y;
     } else {

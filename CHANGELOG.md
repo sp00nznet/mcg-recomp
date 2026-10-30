@@ -44,6 +44,22 @@ versions follow [SemVer](https://semver.org/).
   from `WM_KEYUP`.
 - `LOG_CALLS`: `Logistics::processCheatCode` and `Logistics::loadCampaign`.
 - `--selftest` checks the `[keys]` parser.
+- `--fullscreen` (borderless, over the monitor, no mode switch) and
+  `--window`; `--scale sharp|smooth|integer`. The picture keeps its aspect in
+  any window, with black bars, and the mouse maps through the same rectangle.
+- `--res WxH` (up to 3840x2160): the game runs at that resolution and a
+  mission shows that much more battlefield. Done by replacing PREFS.CFG's
+  resolution after `_systemInit` and scaling the mission's
+  `VisibleVerticesPerSide` as it is read; no engine code patched
+  ([docs/hires.md](docs/hires.md)).
+- `--fps`: engine and display frame rates in the corner and on stderr.
+
+### Changed
+- Presenting runs on its own thread, paced by `DwmFlush` (one blit per
+  compositor frame, newest frame wins), so the engine never waits on the
+  display and game timing is unchanged.
+- The shell is no longer stretched to the window's 5:4 shape: aspect is kept.
+- `--record` records the window as shown (its client size, bars included).
 
 ### Fixed
 - Stale README screenshots of the main menu, deployment and mission.
