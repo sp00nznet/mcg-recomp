@@ -22,10 +22,12 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <dwmapi.h>
 
 #include "recomp_types.h"
 #include "imports.h"
+#include "settings.h"
 
 /* ============================================================
  * The arena: all simulated dynamic memory
@@ -1464,8 +1466,21 @@ static int click_now(int* x, int* y) {
             if (now >= at && !g_clicks[i].sent && g_game_hwnd) {
                 g_clicks[i].sent = 1;
                 fprintf(stderr, "[input] typing %d: \"%s\"\n", i, g_clicks[i].text);
-                for (const char* c = g_clicks[i].text; *c; c++)
-                    PostMessageA(g_game_hwnd, WM_CHAR, (WPARAM)(unsigned char)*c, 1);
+                for (const char* c = g_clicks[i].text; *c; c++) {
+                    /* As a key press would arrive: through mcg.ini [keys], a
+                     * WM_CHAR, then the release. The briefing screen reads
+                     * keys from WM_KEYUP's scan code (the developers' mission
+                     * jump does), the rest of the engine from WM_CHAR. No
+                     * WM_KEYDOWN: TranslateMessage would make a second char. */
+                    unsigned ch = (unsigned char)*c, vk = VkKeyScanA(*c) & 0xFF;
+                    unsigned out = settings_key_out(vk);
+                    if (out != vk) ch = (unsigned)tolower((int)(MapVirtualKeyA(out, MAPVK_VK_TO_CHAR) & 0xFF));
+                    PostMessageA(g_game_hwnd, WM_CHAR, (WPARAM)ch,
+                                 1 | ((LPARAM)MapVirtualKeyA(out, MAPVK_VK_TO_VSC) << 16));
+                    /* the PHYSICAL key: PeekMessageA remaps it like a real one */
+                    PostMessageA(g_game_hwnd, WM_KEYUP, (WPARAM)vk, 1 | 0xC0000000 |
+                                 ((LPARAM)MapVirtualKeyA(vk, MAPVK_VK_TO_VSC) << 16));
+                }
             }
             continue;
         }
@@ -1518,11 +1533,13 @@ void imp_GetAsyncKeyState(void) {
     }
     /* Headless, the real keyboard and mouse belong to whoever is at the
      * machine: only scripted input counts. */
-    RET(g_headless ? 0 : (uint32_t)(uint16_t)GetAsyncKeyState((int)ARG(0)));
+    unsigned vk = ARG(0) < 8 ? ARG(0) : settings_key_in(ARG(0));   /* buttons stay */
+    RET(g_headless || !vk ? 0 : (uint32_t)(uint16_t)GetAsyncKeyState((int)vk));
     STDRET(1);
 }
 void imp_GetKeyState(void) {
-    RET(g_headless ? 0 : (uint32_t)(uint16_t)GetKeyState((int)ARG(0)));
+    unsigned vk = ARG(0) < 8 ? ARG(0) : settings_key_in(ARG(0));
+    RET(g_headless || !vk ? 0 : (uint32_t)(uint16_t)GetKeyState((int)vk));
     STDRET(1);
 }
 void imp_GetCaretBlinkTime(void) { RET(GetCaretBlinkTime()); STDRET(0); }
@@ -1729,7 +1746,17 @@ void imp_PeekMessageA(void) {
       } }
     MSG m;
     BOOL got = PeekMessageA(&m, HWND_OF(ARG(1)), ARG(2), ARG(3), ARG(4));
+    if (got && m.message >= WM_KEYDOWN && m.message <= WM_SYSKEYUP &&
+        m.message != WM_CHAR && m.message != WM_DEADCHAR) {
+        unsigned vk = settings_key_out((unsigned)m.wParam);   /* mcg.ini [keys] */
+        if (vk != m.wParam) {
+            m.wParam = vk;
+            m.lParam = (m.lParam & ~0x01FF0000) |
+                       ((LPARAM)MapVirtualKeyA(vk, MAPVK_VK_TO_VSC) << 16);
+        }
+    }
     if (got) msg_out(ARG(0), &m);
+    settings_tick();
     RET(got ? 1 : 0);
     STDRET(5);
 }

@@ -172,6 +172,12 @@ first 'Mech is selected and walks to open ground.
 | `--click SPEC` | scripted mouse: `x,y@t` clicks and `x,y>x2,y2@t` drags in the 640x480 shell's coordinates (the mission's 1280x1024 once it runs), and `:text@t` to type, `t` in seconds from the campaign shell appearing |
 | `--selftest` | check the lifted CRT string routines, number parser, float printing and blitters against the host |
 
+Settings live in `build\mcg.ini`, written with defaults on the first run:
+key remapping (`[keys] Q=A`), `[game] unlock_missions=1` (the developers' own
+mission jump: type a mission's two-digit number on the briefing screen), and
+the display and sound keys the flags also set. A flag beats the file. See
+[docs/settings.md](docs/settings.md).
+
 Bring-up switches (environment): `MCG_WATCH=0xADDR` names the call that changes
 a dword, `MCG_CURSOR=x,y` pins the pointer, `MCG_NOSCALE=1` shows the raw
 display mode. All of them, and what each was for, are in

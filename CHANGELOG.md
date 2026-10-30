@@ -5,6 +5,22 @@ versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `mcg.ini` beside the exe (`src/runtime/settings.c`): written with defaults on
+  first run, read with the Win32 profile API; `mcg_setting(section, key, dflt)`
+  for the display and sound flags to fall back on. docs/settings.md.
+- `[keys]` remapping, host-side: `PeekMessageA` rewrites key messages (key and
+  scan code), `GetAsyncKeyState`/`GetKeyState` poll the bound physical key.
+- `[game] unlock_missions=1`: arms the developers' mission jump left in
+  `Logistics::processCheatCode` (enable flag `0x00808654`, never set in the
+  retail build). Two digits on the briefing screen go to any campaign mission
+  with your roster.
+- Scripted typing (`:text@t`) also posts the `WM_KEYUP` with its scan code, as a
+  real key does, and goes through `[keys]`. The briefing screen reads keys
+  from `WM_KEYUP`.
+- `LOG_CALLS`: `Logistics::processCheatCode` and `Logistics::loadCampaign`.
+- `--selftest` checks the `[keys]` parser.
+
 ## [0.1.0] - 2026-10-30
 
 First release: boots, plays the menus, and plays the first campaign mission

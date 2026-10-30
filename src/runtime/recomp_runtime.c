@@ -24,6 +24,7 @@
 
 #include "recomp_types.h"
 #include "imports.h"
+#include "settings.h"
 #include "image_loader.h"
 #include "crash_report.h"
 
@@ -1439,6 +1440,17 @@ static int crt_selftest(void) {
         }
     }
 
+    /* mcg.ini [keys]: the name parser and the table, without a file. */
+    {
+        extern int settings_bind(const char* line);
+        expect("[keys] Q=A parses", (uint32_t)settings_bind("Q = A"), 1);
+        expect("[keys] Q is seen as A", settings_key_out('Q'), 'A');
+        expect("[keys] F5=0x20 parses", (uint32_t)settings_bind("F5=0x20"), 1);
+        expect("[keys] F5 is seen as space", settings_key_out(VK_F5), VK_SPACE);
+        expect("[keys] junk is refused", (uint32_t)settings_bind("BOGUS=A"), 0);
+        expect("[keys] unbound key unchanged", settings_key_out('W'), 'W');
+    }
+
     fprintf(stderr, "=== %s (%d failure%s) ===\n",
             g_st_fail ? "FAILURES" : "all passed", g_st_fail,
             g_st_fail == 1 ? "" : "s");
@@ -1478,6 +1490,7 @@ int main(int argc, char** argv) {
         else if (!strcmp(a, "--click") && v) { _putenv_s("MCG_CLICK", v); i++; }
         else { fputs(USAGE, stderr); return 2; }
     }
+    settings_init();        /* mcg.ini beside the exe; flags above win */
     /* Resolved before the chdir below, so it lands where the caller meant. */
     static char rec[MAX_PATH];
     if (g_record_path && GetFullPathNameA(g_record_path, MAX_PATH, rec, NULL))
@@ -1518,6 +1531,7 @@ int main(int argc, char** argv) {
     recomp_install_crash_handler();
 
     mcg_install_iat();
+    settings_apply_game();
     fprintf(stderr, "[runtime] %u lifted functions, %u import bridges\n",
             recomp_dispatch_count, mcg_import_bridge_count);
 

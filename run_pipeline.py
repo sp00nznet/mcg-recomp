@@ -118,6 +118,11 @@ LOG_CALLS = {
     0x00737EB0: ('Scenario::setObjectiveStatus: objective %u -> %u (1 success, 2 failed)',
                  'MEM32(esp + 4), MEM32(esp + 8)'),
     0x0072BC20: 'Mission::EndScenario',
+    # mcg.ini unlock_missions: the briefing screen's key feed, and the reload
+    # the developers' mission jump ends in.
+    0x006FFA50: ('Logistics::processCheatCode: scan code %u', 'MEM32(esp + 4) & 0xFFFFu'),
+    0x006F4DE0: ('Logistics::loadCampaign: %s%s',
+                 '(const char*)(uintptr_t)MEM32(esp + 4), (const char*)(uintptr_t)MEM32(esp + 8)'),
 }
 
 
