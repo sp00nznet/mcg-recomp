@@ -120,6 +120,16 @@ LOG_CALLS = {
     0x0072BC20: 'Mission::EndScenario',
 }
 
+# Functions whose generated body calls a runtime hook first, by name. The hook
+# decides for itself whether it is armed (an env var), so an unarmed build pays
+# one call per entry. Not for hot functions -- see OVERRIDES above.
+HOOK_CALLS = {
+    # MCG_SPRITEDUMP=dir: capture every 'Mech sprite packet the engine loads
+    # and what its own shape filler makes of it (docs/sprites.md).
+    0x00643A00: 'recomp_hook_getMechShapeData',
+    0x006B4F50: 'recomp_hook_Shape_init',
+}
+
 
 # --------------------------------------------------------------------------
 def c_name(entry):
@@ -286,6 +296,9 @@ def lift_function(lifter, name, insns, leaders):
     # instead of saying sub_00000000. Free unless -DRECOMP_TRACE, which also
     # keeps the last 1024 entries as a backtrace.
     lines.append(f'    RECOMP_ENTER(0x{insns[0].address:08X}u);' if insns else '')
+    if insns and insns[0].address in HOOK_CALLS:
+        h = HOOK_CALLS[insns[0].address]
+        lines.append(f'    {{ extern void {h}(void); {h}(); }}')
     if insns and insns[0].address in LOG_CALLS:
         # A value is a message, or (message with printf fields, C arguments
         # [, 'dedupe']). With 'dedupe' a call whose first argument repeats the

@@ -12,6 +12,16 @@ versions follow [SemVer](https://semver.org/).
   and a duplicated buffer has its own cursor. `MCG_VOLUME`, `MCG_MUTE`, and
   `MCG_WAVDUMP=file.wav` to hear a headless run (headless never opens a
   device, but the clock still runs). A stream API for movie sound.
+- **The 'Mech sprite format is settled** ([docs/sprites.md](docs/sprites.md)):
+  a standard VFX shape table behind a 6-byte prefix, one LZ-packed packet per
+  gesture and direction in a PAK nested per 'Mech in `LEGS/TORSOS/RARMS/LARMS
+  [90].PAK`. Read out of the engine's own `getMechShapeData` / `Shape::init` /
+  `AG_shape_draw`.
+- `tools/sprites.py`: a standalone decoder that writes a 'Mech's frames as
+  PNGs (to the gitignored `out/`), with `--selftest` against the engine.
+- `MCG_SPRITEDUMP=dir` (off by default): the runtime writes every 'Mech packet
+  the engine loads and what its lifted `AG_shape_draw` makes of each frame.
+  Hooked through the new `HOOK_CALLS` table in `run_pipeline.py`.
 
 ### Fixed
 - Stale README screenshots of the main menu, deployment and mission.
