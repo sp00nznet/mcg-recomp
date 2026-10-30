@@ -5,6 +5,17 @@ versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Sound**: DirectSound buffers play. `audio.c` mixes them on waveOut at
+  44.1 kHz with each buffer's rate, volume and pan, and moves the play cursor
+  in real time so the engine's streaming works; `Lock` wraps around the ring
+  and a duplicated buffer has its own cursor. `MCG_VOLUME`, `MCG_MUTE`, and
+  `MCG_WAVDUMP=file.wav` to hear a headless run (headless never opens a
+  device, but the clock still runs). A stream API for movie sound.
+
+### Fixed
+- Stale README screenshots of the main menu, deployment and mission.
+
 ## [0.1.0] - 2026-10-30
 
 First release: boots, plays the menus, and plays the first campaign mission

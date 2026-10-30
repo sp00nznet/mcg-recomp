@@ -869,7 +869,7 @@ void imp_GetSystemTimeAsFileTime(void) {
  * ============================================================ */
 
 /* One device. This was 0 while there was genuinely nothing behind it, but the
- * DirectSound mock is a real (silent) output now, and the engine treats zero
+ * DirectSound mock is a real output now, and the engine treats zero
  * wave devices as a hard failure -- "No Digital Sound Hardware Installed" --
  * which leaves its sound objects unconstructed and the logistics UI drawing
  * through a vtable pointer that was never written. */
