@@ -10,9 +10,18 @@ versions follow [SemVer](https://semver.org/).
   format description (palette, 4x4 MONO/FULL/SKIP/FILL video, DPCM audio) and
   real bodies for all ten smackw32 imports. The FASA logo, the opening
   cinematic, briefing and pilot videos decode; audio is decoded to s16 and
-  pushed to the host stream API in `audio.h` (no-op `audio_stub.c` until host
-  audio lands). Frames are paced to the movie's own clock. Build smacker.c with
+  pushed to the host stream API in `audio.h`
+  and mixed with the game sound. Frames are paced to the movie's own clock. Build smacker.c with
   `-DSMK_TEST` for a standalone check that dumps frames and a WAV.
+- **Sound**: DirectSound buffers play. `audio.c` mixes them on waveOut at
+  44.1 kHz with each buffer's rate, volume and pan, and moves the play cursor
+  in real time so the engine's streaming works; `Lock` wraps around the ring
+  and a duplicated buffer has its own cursor. `MCG_VOLUME`, `MCG_MUTE`, and
+  `MCG_WAVDUMP=file.wav` to hear a headless run (headless never opens a
+  device, but the clock still runs). A stream API for movie sound.
+
+### Fixed
+- Stale README screenshots of the main menu, deployment and mission.
 
 ## [0.1.0] - 2026-10-30
 

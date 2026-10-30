@@ -435,7 +435,7 @@ typedef struct {
     uint32_t va;               /* the Smack struct in simulated memory */
     smk_t* m;
     uint32_t buf, left, top, pitch, height, bufflags;
-    int have_remap;
+    int have_remap, decoded;
     uint8_t remap_pal[768];
     uint8_t remap[256];
     int audio;                 /* host stream id, or -1 */
@@ -477,6 +477,35 @@ static void build_remap(player_t* p) {
 static void publish_palette(player_t* p) {
     memcpy((void*)ADDR(p->va + S_PALETTE), p->m->pal, 768);
     MEM32(p->va + S_NEWPAL) = p->m->pal_changed ? 1 : 0;
+}
+
+/* Draw the current frame where SmackToBuffer last pointed. Called on every
+ * SmackToBuffer too: the engine flips through a chain of back buffers and
+ * names a different one each display(), so drawing only on SmackDoFrame left
+ * every other buffer without the movie. */
+static void blit(player_t* p) {
+    smk_t* m = p->m;
+    if (p->buf && (p->bufflags & 0x80000000u)) {   /* 16bpp surface */
+        int oh = smk_out_h(m), maxh = (int)p->height;
+        const uint8_t* pal = m->pal;
+        for (int y = 0; y < oh && y < maxh; y++) {
+            const uint8_t* sp = m->video + (size_t)((m->flags & 6) ? y / 2 : y) * m->w;
+            uint16_t* d = (uint16_t*)((uint8_t*)(uintptr_t)ADDR(p->buf) +
+                          (size_t)(p->top + y) * p->pitch + p->left * 2);
+            for (int x = 0; x < m->w; x++) {
+                const uint8_t* c = pal + 3 * sp[x];
+                d[x] = (p->bufflags & 0x40000000u)
+                    ? (uint16_t)((c[0] >> 3) << 11 | (c[1] >> 2) << 5 | c[2] >> 3)
+                    : (uint16_t)((c[0] >> 3) << 10 | (c[1] >> 3) << 5 | c[2] >> 3);
+            }
+        }
+    } else if (p->buf) {
+        uint8_t* dst = (uint8_t*)(uintptr_t)ADDR(p->buf) +
+                       (size_t)p->top * p->pitch + p->left;
+        smk_blit(m, dst, (int)p->pitch,
+                 p->height > p->top ? (int)(p->height - p->top) : 0,
+                 p->have_remap ? p->remap : NULL);
+    }
 }
 
 /* Smack* SmackOpen(const char* name, u32 flags, u32 extrabuf) */
@@ -534,6 +563,8 @@ void imp_SmackOpen(void) {
 void imp_SmackClose(void) {
     player_t* p = find(ARG(0));
     if (p) {
+        fprintf(stderr, "[smack] SmackClose at frame %u of %d\n",
+                MEM32(p->va + S_FRAMENUM), p->m->frames);
         if (p->audio >= 0) mcg_audio_stream_close(p->audio);
         smk_free(p->m);
         p->m = NULL;
@@ -549,6 +580,7 @@ void imp_SmackToBuffer(void) {
     if (p) {
         p->left = ARG(1); p->top = ARG(2); p->pitch = ARG(3);
         p->height = ARG(4); p->buf = ARG(5); p->bufflags = ARG(6);
+        if (p->decoded) blit(p);
         { static int said; if (!said) { said = 1;
             fprintf(stderr, "[smack] SmackToBuffer(%u,%u pitch %u h %u buf %08X "
                     "flags %X)\n", p->left, p->top, p->pitch, p->height, p->buf,
@@ -600,27 +632,8 @@ void imp_SmackDoFrame(void) {
             if (p->audio >= 0)
                 mcg_audio_stream_push(p->audio, m->pcm, m->pcm_frames);
         }
-        if (p->buf && (p->bufflags & 0x80000000u)) {   /* 16bpp surface */
-            int oh = smk_out_h(m), maxh = (int)p->height;
-            const uint8_t* pal = m->pal;
-            for (int y = 0; y < oh && y < maxh; y++) {
-                const uint8_t* sp = m->video + (size_t)((m->flags & 6) ? y / 2 : y) * m->w;
-                uint16_t* d = (uint16_t*)((uint8_t*)(uintptr_t)ADDR(p->buf) +
-                              (size_t)(p->top + y) * p->pitch + p->left * 2);
-                for (int x = 0; x < m->w; x++) {
-                    const uint8_t* c = pal + 3 * sp[x];
-                    d[x] = (p->bufflags & 0x40000000u)
-                        ? (uint16_t)((c[0] >> 3) << 11 | (c[1] >> 2) << 5 | c[2] >> 3)
-                        : (uint16_t)((c[0] >> 3) << 10 | (c[1] >> 3) << 5 | c[2] >> 3);
-                }
-            }
-        } else if (p->buf) {
-            uint8_t* dst = (uint8_t*)(uintptr_t)ADDR(p->buf) +
-                           (size_t)p->top * p->pitch + p->left;
-            smk_blit(m, dst, (int)p->pitch,
-                     p->height > p->top ? (int)(p->height - p->top) : 0,
-                     p->have_remap ? p->remap : NULL);
-        }
+        p->decoded = 1;
+        blit(p);
         /* Pace to the movie's clock; resync after a long stall (a load). */
         double t = now_ms();
         p->due += m->ms_x100 / 100.0;

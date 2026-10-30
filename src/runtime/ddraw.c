@@ -28,6 +28,7 @@
 
 #include "recomp_types.h"
 #include "imports.h"
+#include "audio.h"
 
 #define DD_OK                 0x00000000u
 #define DDERR_UNSUPPORTED     0x80004001u
@@ -1014,23 +1015,25 @@ static void dd_CreatePalette(void) {
  * Same shape as above and for the same reason: DSOUND is imported by ordinal
  * (DirectSoundCreate) and everything after it is vtable dispatch, so a stub
  * returning failure leaves SoundRendererInstall dereferencing a null
- * interface. Buffers are real arena memory the engine can lock and fill; that
- * memory is simply never played.
- *
- * ponytail: silent. Buffers accept audio and report position 0, which is
- * enough for the engine to run its mixer and keep time. Wiring the same
- * buffers to a host audio API is the obvious next step and changes nothing
- * above this line.
+ * interface. Buffers are real arena memory the engine locks and fills, and
+ * each is a voice of the mixer in audio.c, which plays it and moves its
+ * cursor in real time.
  * ============================================================ */
 
 #define KIND_DSOUND  4
 #define KIND_DSBUF   5
 
-#define MAX_DSBUFS 64
+#define MAX_DSBUFS MCG_MAX_VOICES
+#define DSBCAPS_PRIMARYBUFFER 0x1u
+#define DSBPLAY_LOOPING       0x1u
+#define DSBSTATUS_PLAYING     0x1u
+#define DSBSTATUS_LOOPING     0x4u
 /* `cap` is what the arena block holds, `bytes` what this buffer claims to be:
  * a released slot keeps its memory so the next buffer of the same size or
- * smaller costs nothing. */
-typedef struct { uint32_t bytes, mem, cap; int used; } dsbuf_t;
+ * smaller costs nothing. A duplicate shares its original's memory and owns
+ * none (cap 0), so its slot is never handed that memory to reuse.
+ * Slot i is mixer voice g_voice[i] (audio.c). */
+typedef struct { uint32_t bytes, mem, cap, flags; int used; } dsbuf_t;
 static dsbuf_t g_dsbuf[MAX_DSBUFS];
 static uint32_t g_dsbuf_n;
 static uint32_t g_vt_dsbuf;
@@ -1039,6 +1042,10 @@ static dsbuf_t* dsbuf_of(uint32_t obj) {
     if (!obj || MEM32(obj + OBJ_KIND) != KIND_DSBUF) return NULL;
     uint32_t i = MEM32(obj + OBJ_INDEX);
     return i < g_dsbuf_n ? &g_dsbuf[i] : NULL;
+}
+static mcg_voice* voice_of(uint32_t obj) {
+    dsbuf_t* b = dsbuf_of(obj);
+    return b ? &g_voice[b - g_dsbuf] : NULL;
 }
 
 static void ds_QueryInterface(void) {
@@ -1068,15 +1075,33 @@ static void ds_GetCaps(void) {
     STDRET(2);
 }
 
+/* A slot: a released one first (with enough memory when `bytes` needs it),
+ * else a new one. NULL when all are in use. */
+static dsbuf_t* dsbuf_take(uint32_t bytes) {
+    for (uint32_t i = 0; i < g_dsbuf_n; i++)
+        if (!g_dsbuf[i].used && (!bytes || g_dsbuf[i].cap >= bytes)) return &g_dsbuf[i];
+    if (g_dsbuf_n >= MAX_DSBUFS) {
+        static int warned;
+        if (!warned) { warned = 1; fprintf(stderr, "[dsound] out of buffers (%u in use)\n", g_dsbuf_n); }
+        return NULL;
+    }
+    return &g_dsbuf[g_dsbuf_n++];
+}
+
+static void voice_format(mcg_voice* v, uint32_t wfx) {
+    v->channels = wfx ? MEM16(wfx + 2) : 2;
+    v->rate     = wfx ? (int)MEM32(wfx + 4) : 22050;
+    v->block    = wfx ? MEM16(wfx + 12) : 4;
+    v->bits     = wfx ? MEM16(wfx + 14) : 16;
+    if (v->channels < 1 || v->channels > 2 || (v->bits != 8 && v->bits != 16) || !v->rate)
+        v->block = 0;                     /* not PCM we can mix: kept silent */
+}
+
 /* DSBUFFERDESC: dwSize, dwFlags, dwBufferBytes, dwReserved, lpwfxFormat */
 static void ds_CreateSoundBuffer(void) {
     uint32_t desc = ARG(1), out = ARG(2);
-    if (!desc || !out || g_dsbuf_n >= MAX_DSBUFS) {
-        RET(DDERR_INVALIDPARAMS);
-        STDRET(4);
-        return;
-    }
-    uint32_t bytes = MEM32(desc + 8);
+    if (!desc || !out) { RET(DDERR_INVALIDPARAMS); STDRET(4); return; }
+    uint32_t flags = MEM32(desc + 4), bytes = MEM32(desc + 8);
     if (!bytes) bytes = 4096;             /* a primary buffer declares none */
 
     /*
@@ -1089,34 +1114,46 @@ static void ds_CreateSoundBuffer(void) {
      * the very next instruction dereferenced it -- so selecting a 'Mech in a
      * mission crashed, but only once enough sounds had been played first.
      */
-    dsbuf_t* b = NULL;
-    uint32_t idx = 0;
-    for (uint32_t i = 0; i < g_dsbuf_n; i++)
-        if (!g_dsbuf[i].used && g_dsbuf[i].cap >= bytes) { b = &g_dsbuf[i]; idx = i; break; }
-    if (!b) {
-        if (g_dsbuf_n >= MAX_DSBUFS) {
-            static int warned;
-            if (!warned) {
-                warned = 1;
-                fprintf(stderr, "[dsound] out of buffers (%u in use)\n", g_dsbuf_n);
-            }
-            RET(DDERR_INVALIDPARAMS);
-            STDRET(4);
-            return;
-        }
-        idx = g_dsbuf_n++;
-        b = &g_dsbuf[idx];
-    }
+    dsbuf_t* b = dsbuf_take(bytes);
+    if (!b) { RET(DDERR_INVALIDPARAMS); STDRET(4); return; }
+    uint32_t idx = (uint32_t)(b - g_dsbuf);
     if (b->cap < bytes) { b->mem = shims_alloc(bytes); b->cap = bytes; }
     b->bytes = bytes;
+    b->flags = flags;
     b->used = 1;
+
+    mcg_audio_lock();
+    mcg_voice* v = &g_voice[idx];
+    memset(v, 0, sizeof *v);
+    v->data = (const uint8_t*)ADDR(b->mem);
+    v->bytes = bytes;
+    voice_format(v, MEM32(desc + 16));
+    mcg_voice_gains(v);
+    mcg_audio_unlock();
+
     MEM32(out) = new_object(g_vt_dsbuf, KIND_DSBUF, idx);
     RET(DD_OK);
     STDRET(4);
 }
 
+/* A duplicate plays the same samples with its own cursor, volume and pan --
+ * the game duplicates a sound to play it twice at once. */
 static void ds_DuplicateSoundBuffer(void) {
-    if (ARG(2)) MEM32(ARG(2)) = ARG(1);
+    dsbuf_t* src = dsbuf_of(ARG(1));
+    uint32_t out = ARG(2);
+    dsbuf_t* b = src ? dsbuf_take(0) : NULL;
+    if (!b || !out) {
+        if (out) MEM32(out) = 0;
+        RET(DDERR_INVALIDPARAMS); STDRET(3); return;
+    }
+    uint32_t idx = (uint32_t)(b - g_dsbuf);
+    b->mem = src->mem; b->cap = 0; b->bytes = src->bytes; b->flags = src->flags; b->used = 1;
+    mcg_audio_lock();
+    g_voice[idx] = g_voice[src - g_dsbuf];
+    g_voice[idx].playing = 0;
+    g_voice[idx].pos = 0;
+    mcg_audio_unlock();
+    MEM32(out) = new_object(g_vt_dsbuf, KIND_DSBUF, idx);
     RET(DD_OK);
     STDRET(3);
 }
@@ -1126,7 +1163,7 @@ static void dsb_GetCaps(void) {
     uint32_t p = ARG(1);
     if (p) {
         MEM32(p) = 24;
-        MEM32(p + 4) = 0;
+        MEM32(p + 4) = b ? b->flags | 0x8u : 0;   /* DSBCAPS_LOCSOFTWARE */
         MEM32(p + 8) = b ? b->bytes : 0;
         MEM32(p + 12) = 0;
         MEM32(p + 16) = 0;
@@ -1135,46 +1172,72 @@ static void dsb_GetCaps(void) {
     STDRET(2);
 }
 
-/* Nothing advances, so a looping mixer sees a buffer that never drains. That
- * is the honest answer for silence and keeps the engine's timing sane. */
+/* The play cursor moves in real time (audio.c); the write cursor is 10 ms
+ * ahead of it while playing, as on a card. */
 static void dsb_GetCurrentPosition(void) {
-    if (ARG(1)) MEM32(ARG(1)) = 0;
-    if (ARG(2)) MEM32(ARG(2)) = 0;
+    mcg_voice* v = voice_of(ARG(0));
+    uint32_t play = 0, write = 0;
+    if (v && v->block && v->bytes) {
+        mcg_audio_lock();
+        play = ((uint32_t)v->pos * (uint32_t)v->block) % v->bytes;
+        write = v->playing ? (play + (uint32_t)(v->rate / 100) * (uint32_t)v->block) % v->bytes : play;
+        mcg_audio_unlock();
+    }
+    if (ARG(1)) MEM32(ARG(1)) = play;
+    if (ARG(2)) MEM32(ARG(2)) = write;
     RET(DD_OK);
     STDRET(3);
 }
 
-static void dsb_GetStatus(void) { if (ARG(1)) MEM32(ARG(1)) = 0; RET(DD_OK); STDRET(2); }
-static void dsb_GetVolume(void) { if (ARG(1)) MEM32(ARG(1)) = 0; RET(DD_OK); STDRET(2); }
-static void dsb_GetPan(void)    { if (ARG(1)) MEM32(ARG(1)) = 0; RET(DD_OK); STDRET(2); }
-static void dsb_GetFrequency(void) { if (ARG(1)) MEM32(ARG(1)) = 22050; RET(DD_OK); STDRET(2); }
+static void dsb_GetStatus(void) {
+    mcg_voice* v = voice_of(ARG(0));
+    if (ARG(1)) MEM32(ARG(1)) = v && v->playing ? DSBSTATUS_PLAYING | (v->looping ? DSBSTATUS_LOOPING : 0) : 0;
+    RET(DD_OK);
+    STDRET(2);
+}
+static void dsb_GetVolume(void) { mcg_voice* v = voice_of(ARG(0)); if (ARG(1)) MEM32(ARG(1)) = v ? (uint32_t)v->volume : 0; RET(DD_OK); STDRET(2); }
+static void dsb_GetPan(void)    { mcg_voice* v = voice_of(ARG(0)); if (ARG(1)) MEM32(ARG(1)) = v ? (uint32_t)v->pan : 0; RET(DD_OK); STDRET(2); }
+static void dsb_GetFrequency(void) { mcg_voice* v = voice_of(ARG(0)); if (ARG(1)) MEM32(ARG(1)) = v ? (uint32_t)v->rate : 22050; RET(DD_OK); STDRET(2); }
 
 static void dsb_GetFormat(void) {
+    mcg_voice* v = voice_of(ARG(0));
     uint32_t p = ARG(1);
-    if (p && ARG(2) >= 18) {
+    int ch = v && v->block ? v->channels : 2, bits = v && v->block ? v->bits : 16;
+    int rate = v && v->block ? v->rate : 22050, blk = ch * bits / 8;
+    if (p && ARG(2) >= 16) {
         MEM16(p) = 1;                      /* WAVE_FORMAT_PCM */
-        MEM16(p + 2) = 2;                  /* channels */
-        MEM32(p + 4) = 22050;              /* samples/sec */
-        MEM32(p + 8) = 22050 * 4;          /* avg bytes/sec */
-        MEM16(p + 12) = 4;                 /* block align */
-        MEM16(p + 14) = 16;                /* bits */
-        MEM16(p + 16) = 0;
+        MEM16(p + 2) = (uint16_t)ch;
+        MEM32(p + 4) = (uint32_t)rate;
+        MEM32(p + 8) = (uint32_t)(rate * blk);
+        MEM16(p + 12) = (uint16_t)blk;
+        MEM16(p + 14) = (uint16_t)bits;
+        if (ARG(2) >= 18) MEM16(p + 16) = 0;
     }
     if (ARG(3)) MEM32(ARG(3)) = 18;
     RET(DD_OK);
     STDRET(4);
 }
 
+/* (this, offset, bytes, &p1, &n1, &p2, &n2, flags). Now that cursors move,
+ * a lock across the end of the ring wraps into a second span, as on Windows. */
 static void dsb_Lock(void) {
     dsbuf_t* b = dsbuf_of(ARG(0));
-    uint32_t off = ARG(1), want = ARG(2);
     if (!b) { RET(DDERR_INVALIDPARAMS); STDRET(8); return; }
-    if (off > b->bytes) off = 0;
-    if (!want || off + want > b->bytes) want = b->bytes - off;
+    uint32_t off = ARG(1), want = ARG(2), fl = ARG(7);
+    if (fl & 2u) off = 0, want = b->bytes;                    /* DSBLOCK_ENTIREBUFFER */
+    else if (fl & 1u) {                                       /* DSBLOCK_FROMWRITECURSOR */
+        mcg_voice* v = &g_voice[b - g_dsbuf];
+        mcg_audio_lock();
+        off = v->block ? ((uint32_t)v->pos * (uint32_t)v->block + (uint32_t)(v->rate / 100) * (uint32_t)v->block) % b->bytes : 0;
+        mcg_audio_unlock();
+    }
+    if (off >= b->bytes) off %= b->bytes;
+    if (!want || want > b->bytes) want = b->bytes;
+    uint32_t n1 = off + want <= b->bytes ? want : b->bytes - off;
     if (ARG(3)) MEM32(ARG(3)) = b->mem + off;
-    if (ARG(4)) MEM32(ARG(4)) = want;
-    if (ARG(5)) MEM32(ARG(5)) = 0;         /* never wraps: one span is enough */
-    if (ARG(6)) MEM32(ARG(6)) = 0;
+    if (ARG(4)) MEM32(ARG(4)) = n1;
+    if (ARG(5)) MEM32(ARG(5)) = n1 < want ? b->mem : 0;
+    if (ARG(6)) MEM32(ARG(6)) = want - n1;
     RET(DD_OK);
     STDRET(8);
 }
@@ -1183,21 +1246,68 @@ static void dsb_Lock(void) {
  * hand the slot back, or the pool above drains and never refills. */
 static void dsb_Release(void) {
     dsbuf_t* b = dsbuf_of(ARG(0));
-    if (b) b->used = 0;          /* the arena block stays, ready to be reused */
+    if (b) {
+        mcg_audio_lock();
+        g_voice[b - g_dsbuf].playing = 0;
+        g_voice[b - g_dsbuf].data = NULL;
+        mcg_audio_unlock();
+        b->used = 0;             /* the arena block stays, ready to be reused */
+    }
     RET(0);
     STDRET(1);
 }
 
-static void dsb_Unlock(void) { RET(DD_OK); STDRET(5); }
-static void dsb_Play(void)   { RET(DD_OK); STDRET(4); }
-static void dsb_Stop(void)   { RET(DD_OK); STDRET(1); }
+static void dsb_Unlock(void) { RET(DD_OK); STDRET(5); }   /* the memory IS the buffer */
 static void dsb_Restore(void) { RET(DD_OK); STDRET(1); }
-static void dsb_SetCurrentPosition(void) { RET(DD_OK); STDRET(2); }
-static void dsb_SetFormat(void) { RET(DD_OK); STDRET(2); }
-static void dsb_SetVolume(void) { RET(DD_OK); STDRET(2); }
-static void dsb_SetPan(void) { RET(DD_OK); STDRET(2); }
-static void dsb_SetFrequency(void) { RET(DD_OK); STDRET(2); }
 static void dsb_Initialize(void) { RET(DD_OK); STDRET(3); }
+
+static void dsb_Play(void) {                               /* (this, reserved, priority, flags) */
+    dsbuf_t* b = dsbuf_of(ARG(0));
+    if (b && !(b->flags & DSBCAPS_PRIMARYBUFFER)) {
+        mcg_audio_lock();
+        g_voice[b - g_dsbuf].playing = 1;
+        g_voice[b - g_dsbuf].looping = (ARG(3) & DSBPLAY_LOOPING) != 0;
+        mcg_audio_unlock();
+    }
+    RET(DD_OK);
+    STDRET(4);
+}
+static void dsb_Stop(void) {
+    mcg_voice* v = voice_of(ARG(0));
+    if (v) { mcg_audio_lock(); v->playing = 0; mcg_audio_unlock(); }
+    RET(DD_OK);
+    STDRET(1);
+}
+static void dsb_SetCurrentPosition(void) {
+    mcg_voice* v = voice_of(ARG(0));
+    if (v && v->block && v->bytes) {
+        mcg_audio_lock();
+        v->pos = (double)((ARG(1) % v->bytes) / (uint32_t)v->block);
+        mcg_audio_unlock();
+    }
+    RET(DD_OK);
+    STDRET(2);
+}
+/* Only the primary's format is ever set; the mix runs at its own rate. */
+static void dsb_SetFormat(void) { RET(DD_OK); STDRET(2); }
+static void dsb_SetVolume(void) {
+    mcg_voice* v = voice_of(ARG(0));
+    if (v) { mcg_audio_lock(); v->volume = (int)ARG(1); mcg_voice_gains(v); mcg_audio_unlock(); }
+    RET(DD_OK);
+    STDRET(2);
+}
+static void dsb_SetPan(void) {
+    mcg_voice* v = voice_of(ARG(0));
+    if (v) { mcg_audio_lock(); v->pan = (int)ARG(1); mcg_voice_gains(v); mcg_audio_unlock(); }
+    RET(DD_OK);
+    STDRET(2);
+}
+static void dsb_SetFrequency(void) {
+    mcg_voice* v = voice_of(ARG(0));
+    if (v && ARG(1)) { mcg_audio_lock(); v->rate = (int)ARG(1); mcg_audio_unlock(); }
+    RET(DD_OK);
+    STDRET(2);
+}
 
 /* ============================================================
  * DirectPlay
@@ -1374,6 +1484,6 @@ uint32_t dsound_create(void) {
         g_vt_dsbuf = build_vtable(dsbuf_vt, sizeof dsbuf_vt / sizeof *dsbuf_vt);
     uint32_t vt = build_vtable(ds_vt, sizeof ds_vt / sizeof *ds_vt);
     uint32_t obj = new_object(vt, KIND_DSOUND, 0);
-    fprintf(stderr, "[dsound] DirectSoundCreate -> object 0x%08X (silent)\n", obj);
+    fprintf(stderr, "[dsound] DirectSoundCreate -> object 0x%08X\n", obj);
     return obj;
 }
