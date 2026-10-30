@@ -8,13 +8,23 @@
 # skipped when its output already exists (-Force redoes them), so a rerun after
 # a failure resumes. Everything it does goes to setup.log.
 #
-#   -Game <drive, folder, .iso or .zip>   skip the question
+#   -GameDir <drive, folder, .iso or .zip>   skip the question
 #   -Yes                                  answer yes to every install question
-param([switch]$Force, [switch]$Yes, [string]$Game = "")
+# Under recomp-launcher (RECOMP_LAUNCHER=1) it never waits for Enter, and exit
+# code 0 means the shortcut is there.
+param([switch]$Force, [switch]$Yes, [Alias('Game')][string]$GameDir = "")
+$Game = $GameDir
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
-$Toolkit = if ($env:PCRECOMP) { $env:PCRECOMP } else { Join-Path (Split-Path -Parent $Root) 'tools' }
+# The toolkit is ..\pcrecomp (PCRECOMP overrides it; an older ..\tools is used
+# when there is no ..\pcrecomp).
+$Toolkit = $env:PCRECOMP
+if (-not $Toolkit) {
+  $Toolkit = Join-Path (Split-Path -Parent $Root) 'pcrecomp'
+  $old = Join-Path (Split-Path -Parent $Root) 'tools'
+  if (-not (Test-Path $Toolkit) -and (Test-Path (Join-Path $old 'tools\lift\lift32.py'))) { $Toolkit = $old }
+}
 $Log = Join-Path $Root 'setup.log'
 Set-Location $Root
 function Log($t) { Add-Content -Path $Log -Value $t -Encoding UTF8 }
@@ -22,7 +32,7 @@ Log "==== setup $(Get-Date -Format s)"
 
 function Say($t, $c = 'Gray') { Write-Host $t -ForegroundColor $c; Log $t }
 function Step($n, $t) { Write-Host ""; Say "[$n/7] $t" 'Cyan' }
-function Pause-End { if (-not $Yes) { Read-Host "Press Enter to close" | Out-Null } }
+function Pause-End { if (-not $Yes -and $env:RECOMP_LAUNCHER -ne '1') { Read-Host "Press Enter to close" | Out-Null } }
 function Fail($t) {
   Say ""; Say "Setup stopped: $t" 'Red'
   Say "The details are in $Log. Fix that and run Setup.cmd again; finished steps are skipped." 'Yellow'
@@ -48,7 +58,7 @@ function Run($what, [string[]]$cmd) {
   if ($code -ne 0) { Fail "$what failed (exit code $code)." }
 }
 
-Clear-Host
+if ($env:RECOMP_LAUNCHER -ne '1') { Clear-Host }
 Say "MechCommander Gold: static recompilation setup" 'White'
 Say "You need your own copy of MechCommander Gold (the CD, an image of it, or an installed game folder) and about 2 GB free."
 

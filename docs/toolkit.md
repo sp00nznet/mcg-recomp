@@ -3,7 +3,8 @@
 The lifter, the PE helpers and the `recomp32` runtime pieces come from
 [pcrecomp](https://github.com/sp00nznet/pcrecomp), referenced and never
 vendored. The Python steps find it through `PCRECOMP` (else `..\tools`, a
-checkout beside this repository), CMake through `-DPCRECOMP=` (same default).
+checkout beside this repository; `Setup.cmd` and the installer set it to
+`..\pcrecomp` when that exists), CMake through `-DPCRECOMP=` (same default).
 The lifter and `recomp_types.h` are two halves of one contract, so both must
 come from the same checkout: `run_pipeline.py` copies the header next to the
 generated C for exactly that reason.

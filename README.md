@@ -10,7 +10,7 @@ Built on the [pcrecomp](https://github.com/sp00nznet/pcrecomp) toolchain and
 following its shared house style (layout, CLI, conformance harness, headless
 mode).
 
-## Status: **v0.1.0-dev, alpha. Boots, plays the menus, and plays the first campaign mission start to finish: every objective destroyed, "MISSION SUCCESSFUL", the debriefing with its salvage. Recompiled throughout.**
+## Status: **v0.1.0, alpha. Boots, plays the menus, and plays the first campaign mission start to finish: every objective destroyed, "MISSION SUCCESSFUL", the debriefing with its salvage. Recompiled throughout.**
 
 | Stage | State |
 |---|---|
@@ -51,7 +51,18 @@ You need **your own copy of MechCommander Gold**: the CD, an ISO of it, a zip
 of it, or an installed game folder (anything with `MCX.EXE` in it). Nothing is
 downloaded for you.
 
-### Quick start
+### Quick start: the installer
+
+Download `MechCommander-Gold-Recomp-Installer-windows-x64.exe` from the
+[latest release](https://github.com/sp00nznet/mcg-recomp/releases/latest) and
+run it. It looks for your copy of the game (or **Choose folder…**), then
+**Build** downloads this repository and pcrecomp and runs `Setup.cmd` below for
+you, and **Play** starts the game. It is unsigned, so Windows SmartScreen asks
+first (**More info**, **Run anyway**). It is
+[recomp-launcher](https://github.com/sp00nznet/recomp-launcher) with this
+repo's `launcher/launcher.json`; nothing of the game is in it.
+
+### Quick start: Setup.cmd
 
 1. Download this repository (the green **Code** button, then **Download ZIP**)
    and unzip it somewhere with 2 GB free.

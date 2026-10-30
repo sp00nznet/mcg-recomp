@@ -1,0 +1,19 @@
+# The installer for this commit (recomp-launcher with launcher/launcher.json):
+# an artifact on every push to main, a release file on a v* tag.
+name: installer
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    uses: sp00nznet/recomp-launcher/.github/workflows/installer.yml@main
+    with:
+      name: MechCommander-Gold-Recomp-Installer
+      platforms: windows

@@ -1,0 +1,17 @@
+{
+  "title": "MechCommander Gold",
+  "repo": "sp00nznet/mcg-recomp",
+  "accent": "#c8102e",
+  "note": {
+    "windows": "The build takes about 10 minutes and 2 GB, including a copy of the game (about 640 MB). Python and the Visual Studio 2022 Build Tools are installed if they are missing; the Build Tools are about 3 GB and add 15 to 30 minutes, and Windows asks for permission once."
+  },
+  "game": {
+    "name": "MechCommander Gold",
+    "files": ["MCX.EXE|mcx.exe|*.iso|*.zip"]
+  },
+  "sources": [{ "repo": "sp00nznet/pcrecomp", "ref": "main", "dir": "pcrecomp" }],
+  "setup": {
+    "windows": ["cmd", "/c", "Setup.cmd", "-Yes", "-GameDir", "{game}"]
+  },
+  "play": "MechCommander Gold.*"
+}

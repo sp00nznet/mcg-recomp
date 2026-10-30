@@ -5,7 +5,16 @@ versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-30
+
+First release: boots, plays the menus, and plays the first campaign mission
+through to its debriefing. Silent, and the movies are skipped.
+
 ### Added
+- A Windows installer (recomp-launcher, `launcher/launcher.json`,
+  `.github/workflows/installer.yml`): it finds your copy of the game, builds
+  the recomp from it and leaves a Play button. It is attached to each release.
+- `CONTRIBUTING.md`.
 - **Mission 1 plays through to "MISSION SUCCESSFUL"**: Camp Alpha's HQ and gas
   tower, the three Garrison buildings, Camp Beta's guard and HQ, then the
   debriefing with its statistics, objectives and salvage. Attack orders,
@@ -63,6 +72,8 @@ versions follow [SemVer](https://semver.org/).
 - The toolkit is found through `PCRECOMP`, else `..\tools`, instead of a fixed
   path. Built against pcrecomp `main` (`8f4aa77`): no unmerged toolkit change is
   needed any more.
+- `Setup.cmd` takes `-GameDir` (`-Game` still works), never waits for Enter
+  under the installer, and looks for the toolkit in `..\pcrecomp` first.
 - `gen_imports.py` is now in the repository; the build needed it and it was
   never committed.
 
@@ -80,3 +91,6 @@ versions follow [SemVer](https://semver.org/).
 - `ddraw.c` redefined the SDK's `E_NOINTERFACE` (a `/WX` error in CI).
 - Link error against current pcrecomp: the runtime now defines
   `g_icall_from`, which `recomp_types.h` declares for trace builds.
+
+[Unreleased]: https://github.com/sp00nznet/mcg-recomp/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/sp00nznet/mcg-recomp/releases/tag/v0.1.0
