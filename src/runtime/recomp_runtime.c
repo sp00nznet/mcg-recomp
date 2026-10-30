@@ -968,6 +968,18 @@ static void mcg_Camera_changeTarget(void) {
 void recomp_systemInit_007590D0(void);
 static void mcg_systemInit(void) {
     recomp_systemInit_007590D0();
+    /* The shipped PREFS.CFG has no Resolution line: the 1999 installer's
+     * MCCONFIG.DLL wrote it. A copy of the CD (Setup.cmd's, the installer's)
+     * has none, and the engine then sets no display mode and stalls in the
+     * shell. Supply what that installer chose on any machine of the day. */
+    uint32_t mode = MEM32(0x007AB1D8u);
+    if (mode < 1 || mode > 3 || !MEM32(0x007A9E70u) || !MEM32(0x007AA920u)) {
+        fprintf(stderr, "[res] PREFS.CFG gives no Resolution (mode %u, %ux%u): using 3, 1280x1024\n",
+                mode, MEM32(0x007A9E70u), MEM32(0x007AA920u));
+        MEM32(0x007AB1D8u) = 3;         /* displayMode */
+        MEM32(0x007A9E70u) = 1280;      /* displayWidth  */
+        MEM32(0x007AA920u) = 1024;      /* displayHeight */
+    }
     if (g_res_w && g_res_h) {
         fprintf(stderr, "[res] %dx%d replaces PREFS.CFG's %ux%u\n", g_res_w, g_res_h,
                 MEM32(0x007A9E70u), MEM32(0x007AA920u));

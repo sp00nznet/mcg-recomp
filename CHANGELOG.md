@@ -62,6 +62,12 @@ versions follow [SemVer](https://semver.org/).
 - `--record` records the window as shown (its client size, bars included).
 
 ### Fixed
+- **A fresh install stalled before the shell.** The shipped `PREFS.CFG` has no
+  `Resolution` line (the 1999 installer's MCCONFIG.DLL wrote it), so a copy of
+  the CD left the engine with display mode 0 at 640x480 and it never set a
+  display mode. The runtime now supplies mode 3, 1280x1024, when it is
+  missing. Earlier test runs passed only because the development copy's
+  `PREFS.CFG` already had the line.
 - Stale README screenshots of the main menu, deployment and mission.
 
 ## [0.1.0] - 2026-10-30
